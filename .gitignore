@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Conda / venv
+.venv/
+env/
+
+# Agent runtime files
+.agent/checkpoint.json
+healing_telemetry.jsonl
+app/
+*.bak
+
+# Keep steering templates but not generated steering files
+# (remove the line below if you want to commit generated steering too)
+# .agent/steering/
+
+# VS Code
+.vscode/settings.json
+.vscode/*.log
+
+# OS
+.DS_Store
+Thumbs.db

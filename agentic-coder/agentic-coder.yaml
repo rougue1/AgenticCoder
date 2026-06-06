@@ -1,0 +1,115 @@
+# ════════════════════════════════════════════════════════════════
+# agentic-coder.yaml — Project Configuration
+#
+# Copy this file to your project root and edit for your project.
+# All paths are relative to the project root unless otherwise noted.
+# ════════════════════════════════════════════════════════════════
+
+# ── Environment ──────────────────────────────────────────────────
+# Name of the conda environment the pipeline creates and runs in.
+# The environment will be created automatically on first run.
+# Must be a valid conda environment name (no spaces).
+conda_env: "agent_app_env"
+
+# Python version to use when creating the conda environment.
+python_version: "3.11"
+
+# ── Model Assignment ─────────────────────────────────────────────
+# Each tier maps to a locally-served LLM via OpenAI-compatible API.
+# All models must be running and accessible at `api_base` below.
+#
+# Tier roles:
+#   architect  — Plans implementation strategy. Needs strong reasoning.
+#                Recommended: deepseek-r1:32b, qwen2.5-coder:32b
+#   surgeon    — Writes all implementation + test code.
+#                Recommended: qwen2.5-coder:32b, deepseek-coder-v2
+#   healer     — First-pass repair agent. Smaller/faster is fine.
+#                Recommended: qwen2.5-coder:7b, qwen2.5-coder:14b
+#   validator  — Pre-flight code auditor. Lightweight checks.
+#                Recommended: qwen2.5-coder:7b, llama3.1:8b
+
+models:
+    architect: "deepseek-r1:32b"
+    surgeon: "qwen2.5-coder:32b"
+    healer: "qwen2.5-coder:7b"
+    validator: "qwen2.5-coder:7b"
+
+# Model to escalate to when the healer exhausts first-pass retries.
+# Should be the same as or more capable than the surgeon model.
+healer_escalation_model: "qwen2.5-coder:32b"
+
+# ── API Configuration ─────────────────────────────────────────────
+# Base URL for the OpenAI-compatible local inference server.
+# Ollama default: http://localhost:11434/v1
+# LM Studio default: http://localhost:1234/v1
+# vLLM default: http://localhost:8000/v1
+api_base: "http://localhost:11434/v1"
+
+# API key — for local servers, any non-empty string works.
+api_key: "ollama"
+
+# ── Generation Parameters ─────────────────────────────────────────
+# Temperature: lower = more deterministic, higher = more creative.
+# For code generation, 0.1–0.3 is recommended.
+# Architect uses a slightly higher temperature for creative planning.
+
+temperature:
+    architect: 0.3
+    surgeon: 0.1
+    healer: 0.15
+    validator: 0.1
+
+# Max tokens per LLM call. Increase if models are truncating output.
+# Warning: very high values slow inference on smaller GPUs.
+max_tokens:
+    architect: 8192
+    surgeon: 12288
+    healer: 8192
+    validator: 4096
+
+# ── Healer Loop ───────────────────────────────────────────────────
+# Maximum number of repair passes the healer makes before halting.
+# Each pass: run tests → diagnose failure → apply patch → repeat.
+# Recommended: 3–5 (more passes = longer runtime but higher success rate)
+max_healer_retries: 3
+
+# After how many failed healer passes to escalate to a larger model.
+# 0 = escalate immediately on first failure
+# 1 = use healer model for pass 1, escalate from pass 2 onward
+healer_escalate_after: 1
+
+# ── Surgeon Quality Gate ──────────────────────────────────────────
+# Minimum character count for a valid surgeon response.
+# Responses shorter than this are assumed to be truncated and retried once.
+surgeon_min_output_chars: 100
+
+# ── Git Integration ───────────────────────────────────────────────
+# DISABLED — set to false to skip all git operations entirely.
+# Git commit after each successful task cycle.
+# Requires git to be initialized in the project root.
+git_autocommit: false
+
+# Commit message format. Variables: {task_index}, {task_desc}, {timestamp}
+# Example: "feat(agent): [12/47] Create app/backend/models.py..."
+git_commit_template: "feat(agent): [{task_index}/{total_tasks}] {task_desc:.60}"
+
+# ── Dependency Management ─────────────────────────────────────────
+# Auto-scan for new imports after each task and install missing packages.
+# Uses pipreqs + pip inside the conda env.
+auto_install_deps: true
+
+# Whether to pin package versions in requirements.txt.
+# true = pin to currently installed version (reproducible)
+# false = no version pins (always latest)
+pin_dependency_versions: true
+
+# ── Logging ──────────────────────────────────────────────────────
+# Telemetry log file path (relative to project root).
+# Each task cycle appends one JSONL record.
+telemetry_file: "healing_telemetry.jsonl"
+
+# Log level: DEBUG | INFO | WARN | ERROR
+log_level: "INFO"
+
+# Print full LLM prompts to console (very verbose, useful for debugging)
+debug_prompts: false
