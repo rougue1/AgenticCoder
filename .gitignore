@@ -30,6 +30,9 @@ app/
 .DS_Store
 Thumbs.db
 
+# SDD docs
+agentic-coder/sdd-docs/
+
 # Initial new chat prompt and temporary files
 InitialNewChatPrompt.md
 temp.txt

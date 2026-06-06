@@ -49,9 +49,13 @@ def boot() -> None:
     print("=" * 60)
 
     root_dir = Path(__file__).parent.parent.absolute()
+
     config = load_config(root_dir)
     app_dir = root_dir / "app"
     agent_dir = root_dir / ".agent"
+    
+    # SDD documents now live in root_dir/sdd-docs/ to keep root cleaner. Update paths accordingly.
+    sdd_dir = root_dir / "sdd-docs"
     telemetry_file = root_dir / "healing_telemetry.jsonl"
 
     app_dir.mkdir(exist_ok=True)
@@ -115,7 +119,7 @@ def boot() -> None:
     ensure_conda_env(conda_env)
 
     # ── Print initial task queue state ──
-    completed, total = count_tasks(root_dir / "tasks.md")
+    completed, total = count_tasks(sdd_dir / "tasks.md")
     print(
         f"\n[BOOT] Task queue: {completed}/{total} complete. Starting cycle...\n"
     )
@@ -126,7 +130,7 @@ def boot() -> None:
     # MAIN TASK LOOP
     # ══════════════════════════════════
     while True:
-        active_task = get_next_task(root_dir / "tasks.md")
+        active_task = get_next_task(sdd_dir / "tasks.md")
 
         if not active_task:
             print(
@@ -137,7 +141,7 @@ def boot() -> None:
             sys.exit(0)
 
         task_index += 1
-        _, total = count_tasks(root_dir / "tasks.md")
+        _, total = count_tasks(sdd_dir / "tasks.md")
 
         print(f"\n{'═' * 60}")
         print(f"  TASK {task_index}/{total}")
@@ -188,6 +192,8 @@ def run_task_cycle(
 
     Returns True on full success, False if healer loop exhausted.
     """
+
+    sdd_dir = root_dir / "sdd-docs"
 
     # ── Step 1: Architect plans ──
     plan = get_architect_plan(task_desc, app_dir, root_dir)
@@ -248,8 +254,7 @@ def run_task_cycle(
     update_dependencies(app_dir, root_dir, conda_env)
 
     # ── Step 11: Commit task state ──
-    committed = commit_task_complete(root_dir / "tasks.md", task_desc,
-                                     root_dir)
+    committed = commit_task_complete(sdd_dir / "tasks.md", task_desc, root_dir)
     if not committed:
         print(
             "[WARN] Could not mark task complete in tasks.md. Continuing anyway."

@@ -9,9 +9,10 @@ def sdd_documents_exist(root_dir: Path) -> bool:
     Returns True only if all three SDD foundation documents exist.
     All three must be present — partial state is treated as missing.
     """
-    return ((root_dir / "requirements.md").exists()
-            and (root_dir / "design.md").exists()
-            and (root_dir / "tasks.md").exists())
+    sdd_dir = root_dir / "sdd-docs"
+    return ((sdd_dir / "requirements.md").exists()
+            and (sdd_dir / "design.md").exists()
+            and (sdd_dir / "tasks.md").exists())
 
 
 def read_design_doc(root_dir: Path) -> str:
@@ -20,7 +21,7 @@ def read_design_doc(root_dir: Path) -> str:
     Used by the Architect to inject architectural context into planning prompts.
     Returns empty string if file doesn't exist yet.
     """
-    design_path = root_dir / "design.md"
+    design_path = root_dir / "sdd-docs" / "design.md"
     if design_path.exists():
         return design_path.read_text(encoding="utf-8")
     return ""
@@ -114,11 +115,12 @@ def generate_sdd_documents(project_desc: str, root_dir: Path) -> None:
             print(
                 "[WARN] Architect generated tasks.md with no '- [ ]' items. Check output."
             )
-
-        (root_dir / "requirements.md").write_text(requirements_content,
+        sdd_dir = root_dir / "sdd-docs"
+        sdd_dir.mkdir(exist_ok=True)
+        (sdd_dir / "requirements.md").write_text(requirements_content,
                                                   encoding="utf-8")
-        (root_dir / "design.md").write_text(design_content, encoding="utf-8")
-        (root_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
+        (sdd_dir / "design.md").write_text(design_content, encoding="utf-8")
+        (sdd_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
 
         task_count = tasks_content.count("- [ ]")
         print(
