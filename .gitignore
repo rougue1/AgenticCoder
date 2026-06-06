@@ -29,3 +29,7 @@ app/
 # OS
 .DS_Store
 Thumbs.db
+
+# Initial new chat prompt and temporary files
+InitialNewChatPrompt.md
+temp.txt

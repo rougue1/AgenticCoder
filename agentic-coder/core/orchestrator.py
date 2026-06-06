@@ -1,9 +1,10 @@
+import os
 import sys
 import time
 from pathlib import Path
 
 from engine.llm import load_config
-from engine.splicer import splice_multi_file_response
+from engine.splicer import splice_multi_file_response, extract_file_chunks
 from engine.patch import cleanup_snapshots
 from spec.sdd import sdd_documents_exist, generate_sdd_documents
 from spec.tasks import get_next_task, commit_task_complete, count_tasks
@@ -38,6 +39,10 @@ def boot() -> None:
         7. On success: save checkpoint, update deps, mark task complete
         8. On healer failure: halt with exit code 1
         9. On all tasks complete: print summary, clear checkpoint, exit 0
+
+    Reads env vars set by main.py CLI flags:
+        AGENT_AUTO_RESUME=1  → skip resume prompt, always resume
+        AGENT_TASKS_ONLY=1   → skip SDD generation, go straight to task loop
     """
     print("=" * 60)
     print("  AGENTIC-CODER — LOCAL MULTI-TIER AGENT AUTOPILOT")
@@ -54,27 +59,46 @@ def boot() -> None:
 
     conda_env = config.get("conda_env", "agent_app_env")
 
+    # ── Read CLI flags injected by main.py via environment ──
+    auto_resume = os.environ.get("AGENT_AUTO_RESUME") == "1"
+    tasks_only = os.environ.get("AGENT_TASKS_ONLY") == "1"
+
     # ── Resume detection ──
     if checkpoint_exists(root_dir):
         print_checkpoint_status(root_dir)
-        try:
-            resume = input(
-                "\nResume previous session? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            resume = "y"
-        if resume in {"n", "no"}:
-            clear_checkpoint(root_dir)
-            print("[BOOT] Starting fresh session.")
+        if auto_resume:
+            print("[BOOT] Auto-resuming previous session (--resume flag).")
+        else:
+            try:
+                resume = input(
+                    "\nResume previous session? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                resume = "y"
+            if resume in {"n", "no"}:
+                clear_checkpoint(root_dir)
+                print("[BOOT] Starting fresh session.")
 
     # ── SDD document generation ──
-    if not sdd_documents_exist(root_dir):
+    if tasks_only:
+        print("[BOOT] --tasks-only flag set — skipping SDD generation.")
+    elif not sdd_documents_exist(root_dir):
         print("[BOOT] SDD documents not found — initializing new project...")
-        try:
-            project_desc = input(
-                "\nDescribe the application you want to build:\n> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n[ABORTED] No project description provided.")
-            sys.exit(1)
+
+        # Load from testprompt.txt if it exists, otherwise fall back to input()
+        prompt_file = root_dir / "testprompt.txt"
+        if prompt_file.exists():
+            project_desc = prompt_file.read_text(encoding="utf-8").strip()
+            print(
+                f"[BOOT] Loaded project description from testprompt.txt ({len(project_desc)} chars)"
+            )
+        else:
+            try:
+                project_desc = input(
+                    "\nDescribe the application you want to build:\n> ").strip(
+                    )
+            except (EOFError, KeyboardInterrupt):
+                print("\n[ABORTED] No project description provided.")
+                sys.exit(1)
 
         if not project_desc:
             print("[FATAL] Project description is required.")
@@ -235,7 +259,6 @@ def run_task_cycle(
     cleanup_snapshots(root_dir)
 
     # ── Step 13: Save checkpoint ──
-    from engine.splicer import extract_file_chunks
     modified_files = [p for p, _ in extract_file_chunks(surgeon_output)]
     save_checkpoint(root_dir, task_desc, modified_files, task_index,
                     total_tasks)

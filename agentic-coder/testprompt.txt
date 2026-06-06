@@ -1,0 +1,47 @@
+Build a full-stack task management web application with the following specifications:
+
+BACKEND — Flask REST API:
+- User authentication with JWT tokens (register, login, logout, refresh)
+- User model: id, email, password_hash, created_at, is_active
+- Task model: id, user_id (FK), title, description, status (todo/in_progress/done), priority (low/medium/high), due_date, created_at, updated_at
+- Tag model: id, name, color — many-to-many relationship with Tasks via task_tags join table
+- All endpoints return JSON with consistent envelope: {"success": true, "data": ..., "message": "..."}
+- Passwords hashed with bcrypt
+- JWT stored in Authorization header as Bearer token
+- SQLite database with Flask-Migrate for schema migrations
+- Full CRUD for tasks: GET /api/tasks, POST /api/tasks, GET /api/tasks/<id>, PUT /api/tasks/<id>, DELETE /api/tasks/<id>
+- Task filtering: GET /api/tasks?status=todo&priority=high&tag=work
+- Full CRUD for tags: GET /api/tags, POST /api/tags, DELETE /api/tags/<id>
+- Auth endpoints: POST /api/auth/register, POST /api/auth/login, POST /api/auth/logout, GET /api/auth/me
+- All task endpoints require valid JWT — return 401 if missing/invalid
+- Users can only access their own tasks — return 403 if attempting to access another user's task
+- Input validation on all endpoints — return 422 with field-level error details on invalid input
+- Rate limiting: max 100 requests per minute per IP
+
+TESTING:
+- pytest with pytest-flask and pytest-jwt-extended
+- conftest.py with fixtures: app, client, db_session, auth_token, sample_user, sample_tasks
+- Unit tests for all models (User, Task, Tag)
+- Integration tests for all API endpoints including auth flows
+- Test edge cases: duplicate email registration, invalid JWT, accessing other user's tasks, empty task list, filtering with no results
+- Minimum 80% code coverage
+
+TECHNICAL STACK:
+- Python 3.11
+- Flask 3.x with app factory pattern (create_app())
+- SQLAlchemy 2.x (use db.session.get() not query.get())
+- Flask-JWT-Extended for JWT auth
+- Flask-Bcrypt for password hashing
+- Flask-Migrate for database migrations
+- Flask-Limiter for rate limiting
+- marshmallow for request/response serialization and validation
+- SQLite for development database
+- pytest + pytest-flask + pytest-cov for testing
+
+PROJECT STRUCTURE:
+app/backend/ — all Flask application code
+app/backend/tests/ — all pytest tests
+Use absolute imports throughout (from app.backend.models import User)
+All models in a single models.py file
+Routes split by resource: auth_routes.py, task_routes.py, tag_routes.py
+Services layer for business logic: auth_service.py, task_service.py
