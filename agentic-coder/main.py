@@ -69,8 +69,10 @@ def _print_status(root_dir: Path) -> None:
     from core.checkpoint import load_checkpoint
     from spec.tasks import count_tasks
 
+    sdd_dir = root_dir / "sdd-docs"
+
     checkpoint = load_checkpoint(root_dir)
-    completed, total = count_tasks(root_dir / "tasks.md")
+    completed, total = count_tasks(sdd_dir / "tasks.md")
 
     print("\n── AGENTIC-CODER STATUS ─────────────────────────")
     if checkpoint:
@@ -87,9 +89,9 @@ def _print_status(root_dir: Path) -> None:
 
     print(f"  tasks.md:       {completed}/{total} complete")
 
-    sdd_exists = ((root_dir / "requirements.md").exists()
-                  and (root_dir / "design.md").exists()
-                  and (root_dir / "tasks.md").exists())
+    sdd_exists = ((sdd_dir / "requirements.md").exists()
+                  and (sdd_dir / "design.md").exists()
+                  and (sdd_dir / "tasks.md").exists())
     print(f"  SDD docs:       {'✓ Present' if sdd_exists else '✗ Missing'}")
     print("─────────────────────────────────────────────────\n")
 
