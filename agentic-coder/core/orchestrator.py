@@ -53,7 +53,7 @@ def boot() -> None:
     config = load_config(root_dir)
     app_dir = root_dir / "app"
     agent_dir = root_dir / ".agent"
-    
+
     # SDD documents now live in root_dir/sdd-docs/ to keep root cleaner. Update paths accordingly.
     sdd_dir = root_dir / "sdd-docs"
     telemetry_file = root_dir / "healing_telemetry.jsonl"
@@ -238,7 +238,10 @@ def run_task_cycle(
             f"[FIXTURES] Available fixtures:\n  {get_fixture_summary(app_dir)}"
         )
 
-    # ── Step 9: Healer loop ──
+    # ── Step 9: Pre-install any new dependencies the Surgeon introduced ──
+    update_dependencies(app_dir, root_dir, conda_env)
+
+    # ── Step 10: Healer loop ──
     success = execute_healer_loop(
         task_desc=task_desc,
         root_dir=root_dir,
@@ -249,9 +252,6 @@ def run_task_cycle(
 
     if not success:
         return False
-
-    # ── Step 10: Update dependencies ──
-    update_dependencies(app_dir, root_dir, conda_env)
 
     # ── Step 11: Commit task state ──
     committed = commit_task_complete(sdd_dir / "tasks.md", task_desc, root_dir)

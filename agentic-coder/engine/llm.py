@@ -337,3 +337,63 @@ def clean_and_parse_json(raw_text: str) -> dict:
         if start != -1 and end > start:
             return json.loads(cleaned[start:end])
         raise
+
+
+def query_llm_with_json_retry(
+    tier: str,
+    system_prompt: str,
+    user_prompt: str,
+    config: dict,
+    expected_keys: list[str],
+    context_label: str,
+) -> dict:
+    """
+    Wraps query_llm with a bounded corrective-retry loop for calls that must
+    return a JSON object. Implements the hard constraint: retry up to 2 times
+    with a corrective reprompt before halting.
+
+    Args:
+        tier:           Agent tier string ('architect', 'surgeon', etc.)
+        system_prompt:  Full assembled system prompt (steering already injected).
+        user_prompt:    Task-specific user message for the initial call.
+        config:         Loaded config dict.
+        expected_keys:  List of top-level JSON keys the response must contain.
+                        Included in the corrective prompt so the model knows
+                        exactly what shape is required.
+        context_label:  Human-readable label for error messages, e.g. 'Architect plan'
+                        or 'SDD documents'.
+
+    Returns:
+        Parsed dict on success.
+        Calls sys.exit(1) after 2 failed corrective retries — no return on failure.
+    """
+
+    response = query_llm(tier, system_prompt, user_prompt, config)
+
+    # Hard constraint: retry up to 2 times with a corrective prompt before halting.
+    for attempt in range(2):  # attempts 0 and 1 = two corrective retry passes
+        try:
+            return clean_and_parse_json(response)
+        except json.JSONDecodeError as e:
+            print(
+                f"[{tier.upper()}] {context_label} JSON parse failed "
+                f"(attempt {attempt + 1}/3) — issuing corrective reprompt...")
+            keys_desc = "\n".join(f"  '{k}': ..." for k in expected_keys)
+            corrective_user = (
+                f"Your previous response could not be parsed as JSON.\n"
+                f"Error: {e}\n"
+                f"Your output (first 500 chars):\n{response[:500]}\n\n"
+                f"Return ONLY a valid JSON object with exactly "
+                f"{len(expected_keys)} key(s):\n{keys_desc}\n"
+                f"No markdown fences. No explanation. No text before or after the JSON."
+            )
+            response = query_llm(tier, system_prompt, corrective_user, config)
+
+    # Final attempt after two corrective retries
+    try:
+        return clean_and_parse_json(response)
+    except json.JSONDecodeError as e:
+        print(
+            f"[CRITICAL] {context_label} JSON parse failed after 2 retries: {e}\n"
+            f"Raw (first 500): {response[:500]}")
+        sys.exit(1)

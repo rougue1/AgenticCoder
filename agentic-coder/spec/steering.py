@@ -131,7 +131,7 @@ def generate_steering_files(
     steering_dir.mkdir(parents=True, exist_ok=True)
 
     design_content = ""
-    design_path = root_dir / "design.md"
+    design_path = root_dir / "sdd-docs" / "design.md"
     if design_path.exists():
         design_content = design_path.read_text(encoding="utf-8")
 

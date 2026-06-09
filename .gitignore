@@ -13,10 +13,10 @@ build/
 env/
 
 # Agent runtime files
-.agent/checkpoint.json
-healing_telemetry.jsonl
-app/
-*.bak
+# .agent/checkpoint.json
+# healing_telemetry.jsonl
+# app/
+# *.bak
 
 # Keep steering templates but not generated steering files
 # (remove the line below if you want to commit generated steering too)
@@ -31,8 +31,8 @@ app/
 Thumbs.db
 
 # SDD docs
-agentic-coder/sdd-docs/
+# agentic-coder/sdd-docs/
 
 # Initial new chat prompt and temporary files
-InitialNewChatPrompt.md
+InitialNewChatPrompt*.md
 temp.txt
