@@ -1,7 +1,7 @@
 import json
 import sys
 from pathlib import Path
-from engine.llm import query_llm, clean_and_parse_json, load_config
+from engine.llm import query_llm, clean_and_parse_json, load_config, query_llm_with_json_retry
 
 
 def sdd_documents_exist(root_dir: Path) -> bool:
@@ -101,34 +101,34 @@ def generate_sdd_documents(project_desc: str, root_dir: Path) -> None:
         f"Generate the three SDD planning documents for the following project:\n\n"
         f"{project_desc}")
 
-    response_text = query_llm("architect", system_prompt, user_prompt, config)
+    # Hard constraint: retry up to 2 times with a corrective prompt before halting.
+    data = query_llm_with_json_retry(
+        tier="architect",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        config=config,
+        expected_keys=["requirements", "design", "tasks"],
+        context_label="SDD documents",
+    )
 
-    try:
-        data = clean_and_parse_json(response_text)
+    requirements_content = data.get("requirements", "# Requirements\n")
+    design_content = data.get("design", "# Architecture Design\n")
+    tasks_content = data.get("tasks", "# Project Tasks\n")
 
-        requirements_content = data.get("requirements", "# Requirements\n")
-        design_content = data.get("design", "# Architecture Design\n")
-        tasks_content = data.get("tasks", "# Project Tasks\n")
-
-        # Validate tasks.md has at least some checkbox items
-        if "- [ ]" not in tasks_content:
-            print(
-                "[WARN] Architect generated tasks.md with no '- [ ]' items. Check output."
-            )
-        sdd_dir = root_dir / "sdd-docs"
-        sdd_dir.mkdir(exist_ok=True)
-        (sdd_dir / "requirements.md").write_text(requirements_content,
-                                                  encoding="utf-8")
-        (sdd_dir / "design.md").write_text(design_content, encoding="utf-8")
-        (sdd_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
-
-        task_count = tasks_content.count("- [ ]")
+    # Validate tasks.md has at least some checkbox items
+    if "- [ ]" not in tasks_content:
         print(
-            f"[ARCHITECT] SDD documents written:\n"
-            f"  requirements.md, design.md, tasks.md ({task_count} tasks queued)"
+            "[WARN] Architect generated tasks.md with no '- [ ]' items. Check output."
         )
 
-    except json.JSONDecodeError as e:
-        print(f"[CRITICAL] Failed to parse Architect SDD JSON response: {e}")
-        print(f"--- Raw output (first 1200 chars) ---\n{response_text[:1200]}")
-        sys.exit(1)
+    sdd_dir = root_dir / "sdd-docs"
+    sdd_dir.mkdir(exist_ok=True)
+    (sdd_dir / "requirements.md").write_text(requirements_content,
+                                             encoding="utf-8")
+    (sdd_dir / "design.md").write_text(design_content, encoding="utf-8")
+    (sdd_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
+
+    task_count = tasks_content.count("- [ ]")
+    print(
+        f"[ARCHITECT] SDD documents written:\n"
+        f"  requirements.md, design.md, tasks.md ({task_count} tasks queued)")

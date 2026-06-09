@@ -2,7 +2,7 @@ import os
 import re
 from pathlib import Path
 
-from engine.llm import query_llm, clean_and_parse_json, load_config, get_healer_escalation_model
+from engine.llm import query_llm, clean_and_parse_json, load_config, get_healer_escalation_model, query_llm_with_json_retry
 from engine.splicer import splice_multi_file_response
 from engine.syntax import verify_syntax
 from engine.patch import restore_snapshot
@@ -82,15 +82,15 @@ def get_architect_plan(
                    f"Current Directory Tree (app/):\n{tree_str}\n\n"
                    f"Project Design Document:\n{design_context}")
 
-    response = query_llm("architect", system_prompt, user_prompt, config)
-
-    try:
-        return clean_and_parse_json(response)
-    except Exception as e:
-        print(
-            f"[CRITICAL] Architect plan JSON parse failed: {e}\nRaw (first 500): {response[:500]}"
-        )
-        sys.exit(1)
+    # Hard constraint: retry up to 2 times with a corrective prompt before halting.
+    return query_llm_with_json_retry(
+        tier="architect",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        config=config,
+        expected_keys=["context_files", "surgeon_prompt"],
+        context_label="Architect plan",
+    )
 
 
 # ==========================================
