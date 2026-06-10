@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from engine.llm import query_llm, clean_and_parse_json, load_config
 from engine.splicer import splice_multi_file_response
+from spec.steering import build_system_prompt
 
 
 def validate_source_completeness(
@@ -35,18 +36,25 @@ def validate_source_completeness(
         print("[PREFLIGHT] No source files found to audit — proceeding.")
         return True
 
-    system_prompt = (
+    base_prompt = (
         "You are a Code Completeness Auditor in an autonomous coding pipeline. "
         "Review the provided implementation files BEFORE any tests are written against them.\n\n"
         "Check for these specific issues:\n"
-        "1. STUB IMPLEMENTATIONS: functions/methods that only contain 'pass', 'return None', "
-        "   'raise NotImplementedError', or a single comment — when the task context implies "
-        "   real logic should be there\n"
-        "2. MISSING IMPORTS: names used in the file body that are not imported at the top\n"
-        "3. SYNTAX PROBLEMS: unterminated strings, mismatched brackets, broken indentation\n"
-        "4. MISSING __init__.py: package directories that contain .py files but no __init__.py\n"
-        "5. ABSOLUTE PATHS: hardcoded paths like /home/user/... that will break in CI\n"
-        "6. CIRCULAR IMPORT RISK: module A imports module B which imports module A\n\n"
+        "1. STUB IMPLEMENTATIONS: functions/methods/procedures that contain only a no-op body "
+        "   (e.g., a single pass, empty return, or NotImplemented placeholder) when the task "
+        "   context implies real logic should be there\n"
+        "2. MISSING IMPORTS: names used in the file body that are not resolved via any import "
+        "   or module declaration at the top of the file\n"
+        "3. SYNTAX PROBLEMS: unterminated strings, mismatched brackets or braces, "
+        "   broken indentation or block structure\n"
+        "4. MISSING MODULE INIT FILES: package or module directories that require an "
+        "   initialization file for this project's language (as described in structure.md "
+        "   in the steering context) but do not have one\n"
+        "5. ABSOLUTE PATHS: hardcoded filesystem paths that will break outside the "
+        "   developer's machine\n"
+        "6. CIRCULAR DEPENDENCY RISK: module A imports module B which imports module A\n\n"
+        "Consult the injected steering context (structure.md) for the correct module "
+        "initialization file convention for this project's stack before flagging issue #4.\n\n"
         "Return a SINGLE valid JSON object. No markdown fences. No extra text.\n"
         "Format:\n"
         "{\n"
@@ -57,16 +65,18 @@ def validate_source_completeness(
         "OR if issues found:\n"
         "{\n"
         '  "ready": false,\n'
-        '  "issues": ["models.py: User.check_password() only contains pass — needs real bcrypt logic"],\n'
+        '  "issues": ["models.py: check_password() contains only a no-op body — needs real implementation"],\n'
         '  "fixes": {\n'
         '    "app/backend/models.py": "complete corrected file content as a single string"\n'
         "  }\n"
         "}\n\n"
         "IMPORTANT:\n"
         "- Only include a file in 'fixes' if you are confident the fix is correct and complete\n"
-        "- Do NOT fix things that look intentionally minimal (e.g., __init__.py with just imports)\n"
-        "- Set 'ready': true even if you applied fixes — false only means unfixable blocker\n"
+        "- Do NOT fix things that look intentionally minimal (e.g., package init files with just re-exports)\n"
+        "- Set 'ready': true even if you applied fixes — false only means an unfixable blocker\n"
     )
+    system_prompt = build_system_prompt(base_prompt, "validator",
+                                        root_dir / ".agent", app_dir)
 
     user_prompt = (f"Task being implemented: {task_desc}\n\n"
                    f"Source files to audit:\n{source_context}")
@@ -86,11 +96,7 @@ def validate_source_completeness(
 
         if fixes:
             print(f"[PREFLIGHT] Applying {len(fixes)} auto-fix(es)...")
-            for path_str, corrected_content in fixes.items():
-                full_path = root_dir / path_str
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                full_path.write_text(corrected_content, encoding="utf-8")
-                print(f"  [FIXED] {path_str}")
+            apply_validated_fixes(fixes, root_dir)
 
         if not ready:
             print(
@@ -112,6 +118,7 @@ def validate_source_completeness(
 def validate_test_correctness(
     test_files: list[str],
     source_files: list[str],
+    task_desc: str,
     root_dir: Path,
     app_dir: Path,
 ) -> bool:
@@ -144,30 +151,33 @@ def validate_test_correctness(
         print("[PREFLIGHT] No test files to validate — skipping.")
         return True
 
-    system_prompt = (
+    base_prompt = (
         "You are a Test Correctness Auditor in an autonomous coding pipeline. "
-        "Review the provided test files against their implementation and conftest.py fixtures. "
-        "Your job is to catch bugs in the tests themselves BEFORE the test runner runs them.\n\n"
+        "Review the provided test files against their implementation and shared test "
+        "setup files. Your job is to catch bugs in the tests themselves BEFORE the "
+        "test runner collects them.\n\n"
         "Check for these specific anti-patterns:\n\n"
-        "1. FIXTURE MISMATCHES\n"
-        "   Test function parameters that don't match any @pytest.fixture name in conftest.py.\n"
-        "   Example: def test_login(db_session, ...) when conftest only defines 'db', not 'db_session'\n\n"
+        "1. TEST SETUP MISMATCHES\n"
+        "   Test function signatures reference setup helpers (fixtures, hooks, before-each "
+        "   callbacks, or test context objects) that are not defined in any shared test "
+        "   setup file visible in the provided context. Consult the steering context "
+        "   (AGENTS.md, tech.md) for the correct test harness conventions for this stack.\n\n"
         "2. IMPORT ERRORS\n"
-        "   Test files importing from modules that don't exist in the source files provided.\n"
-        "   Example: from app.backend.auth import generate_token — if auth.py doesn't exist yet\n\n"
-        "3. WRONG ASSERTION PATTERNS\n"
-        "   - pytest.raises(Exception) when the function returns None/False on failure\n"
-        "   - assert result == True instead of assert result is True (for boolean checks)\n"
-        "   - Asserting ORM field values before db.session.commit() (SQLAlchemy lazy evaluation)\n"
-        "   - Using .query.get(id) instead of db.session.get(Model, id) (SQLAlchemy 2.x deprecation)\n\n"
-        "4. APP CONTEXT ERRORS\n"
-        "   Database operations (queries, commits, model instantiation) outside app.app_context().\n"
-        "   If using pytest-flask with an 'app' fixture, context is managed automatically — don't double-wrap.\n\n"
-        "5. SESSION SCOPE CONFLICTS\n"
-        "   Using a function-scoped fixture inside a class-scoped or session-scoped test.\n"
-        "   All DB fixtures should use scope='function' to ensure test isolation.\n\n"
+        "   Test files importing from modules that do not exist in the source files provided.\n\n"
+        "3. WRONG ASSERTION OR API PATTERNS\n"
+        "   Assertion style inconsistent with the test framework's idioms, use of deprecated "
+        "   query or assertion APIs, or assertions made on state that has not yet been "
+        "   persisted or flushed. Consult tech.md for the correct assertion and data-access "
+        "   patterns mandated for this project's stack.\n\n"
+        "4. FRAMEWORK CONTEXT ERRORS\n"
+        "   Operations that require application lifecycle setup (e.g., an app context, a "
+        "   transaction scope, or a server process) that is not in place at the point of "
+        "   assertion. Consult tech.md for the correct lifecycle pattern for this stack.\n\n"
+        "5. SCOPE CONFLICTS\n"
+        "   Test setup objects with a narrower lifecycle than the tests that consume them, "
+        "   causing teardown before assertions complete.\n\n"
         "6. TEST ISOLATION VIOLATIONS\n"
-        "   Tests that modify module-level state, global variables, or rely on execution order.\n\n"
+        "   Tests that modify shared mutable state or depend on execution order.\n\n"
         "OUTPUT FORMAT:\n"
         "If issues found — output SEARCH/REPLACE patches using this exact format:\n"
         "### FILE: path/to/test_file.py\n"
@@ -180,14 +190,10 @@ def validate_test_correctness(
         "If everything looks correct — output exactly the string: TESTS_VALID\n"
         "Do NOT output TESTS_VALID if there are any issues. Fix them instead.\n"
     )
+    system_prompt = build_system_prompt(base_prompt, "validator",
+                                        root_dir / ".agent", app_dir)
 
-    user_prompt = (
-        f"Task context: {task_desc}\n\n"
-        f"conftest.py fixtures available:\n{conftest_context}\n\n"
-        f"Files to audit:\n{context}") if (task_desc := "") or True else ""
-
-    # Rebuild user prompt with proper task_desc (closure workaround)
-    user_prompt = (f"Source and test files to audit:\n\n"
+    user_prompt = (f"Task context: {task_desc}\n\n"
                    f"[CONFTEST FIXTURES]\n{conftest_context}\n\n"
                    f"[SOURCE + TEST FILES]\n{context}")
 

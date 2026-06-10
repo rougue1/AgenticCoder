@@ -56,7 +56,8 @@ def boot() -> None:
 
     # SDD documents now live in root_dir/sdd-docs/ to keep root cleaner. Update paths accordingly.
     sdd_dir = root_dir / "sdd-docs"
-    telemetry_file = root_dir / "healing_telemetry.jsonl"
+    telemetry_file = root_dir / config.get("telemetry_file",
+                                           "healing_telemetry.jsonl")
 
     app_dir.mkdir(exist_ok=True)
     agent_dir.mkdir(exist_ok=True)
@@ -225,8 +226,8 @@ def run_task_cycle(
 
     # ── Step 7: Pre-flight test correctness check ──
     if new_test_files:
-        validate_test_correctness(new_test_files, context_files, root_dir,
-                                  app_dir)
+        validate_test_correctness(new_test_files, context_files, task_desc,
+                                  root_dir, app_dir)
 
     # ── Step 8: Fixture drift warning ──
     drift_warnings = check_fixture_drift(app_dir)
@@ -239,7 +240,8 @@ def run_task_cycle(
         )
 
     # ── Step 9: Pre-install any new dependencies the Surgeon introduced ──
-    update_dependencies(app_dir, root_dir, conda_env)
+    if config.get("auto_install_deps", True):
+        update_dependencies(app_dir, root_dir, conda_env)
 
     # ── Step 10: Healer loop ──
     success = execute_healer_loop(

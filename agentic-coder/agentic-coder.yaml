@@ -39,11 +39,11 @@ models:
 healer_escalation_model: "qwen2.5-coder:32b"
 
 # ── API Configuration ─────────────────────────────────────────────
-# Base URL for the OpenAI-compatible local inference server.
-# Ollama default: http://localhost:11434/v1
-# LM Studio default: http://localhost:1234/v1
-# vLLM default: http://localhost:8000/v1
-api_base: "http://localhost:11434/v1"
+# Base URL for the Ollama server. Do NOT include a /v1 path suffix.
+# Ollama default: http://localhost:11434
+# LM Studio default: http://localhost:1234
+# vLLM default: http://localhost:8000
+ollama_base_url: "http://localhost:11434"
 
 # API key — for local servers, any non-empty string works.
 api_key: "ollama"
@@ -109,7 +109,7 @@ pin_dependency_versions: true
 telemetry_file: "healing_telemetry.jsonl"
 
 # Log level: DEBUG | INFO | WARN | ERROR
-log_level: "INFO"
+# log_level: "INFO"
 
 # Print full LLM prompts to console (very verbose, useful for debugging)
 debug_prompts: false

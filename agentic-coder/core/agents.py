@@ -209,9 +209,13 @@ def execute_healer_loop(
     Runs the test suite and, on failure, asks the Healer to diagnose and
     patch the error. Retries up to max_retries times.
 
+    Semantics: max_healer_retries = number of repair attempts.
+    Total test runs = retries + 1 (initial run + one verification per repair).
+    test_output is always bound before the post-loop telemetry call.
+
     Escalation logic:
-        Pass 0:          Use healer model (7B) — fast, cheap
-        Pass 1+:         Escalate to surgeon model (32B) — more capable
+        Repair 0:        Use healer model (7B) — fast, cheap
+        Repair 1+:       Escalate to surgeon model (32B) — more capable
         All retries fail: Return False, orchestrator halts
 
     Returns True if tests pass within the retry budget, False otherwise.
@@ -220,14 +224,17 @@ def execute_healer_loop(
     max_retries = config.get("max_healer_retries", 3)
     escalate_after = config.get("healer_escalate_after", 1)
 
+    # ── Initial test run (always runs, even when max_healer_retries = 0) ──
+    print("[HEALER] Running initial test suite...")
+    exit_code, test_output = run_tests(app_dir, conda_env)
+
+    if exit_code == 0:
+        print("[HEALER] ✓ All tests passing on first run.")
+        log_telemetry(telemetry_file, task_desc, "SUCCESS", 0, "")
+        return True
+
+    # ── Repair loop: each iteration repairs then immediately re-verifies ──
     for iteration in range(max_retries):
-        exit_code, test_output = run_tests(app_dir, conda_env)
-
-        if exit_code == 0:
-            print(f"[HEALER] ✓ All tests passing (attempt {iteration + 1}).")
-            log_telemetry(telemetry_file, task_desc, "SUCCESS", iteration, "")
-            return True
-
         print(f"[HEALER] Test failure (exit {exit_code}) — "
               f"repair pass {iteration + 1}/{max_retries}...")
         log_telemetry(telemetry_file, task_desc, "FAIL_ATTEMPT", iteration,
@@ -290,10 +297,17 @@ def execute_healer_loop(
         patched = splice_multi_file_response(response, root_dir)
 
         if patched:
-            # Run syntax check on all patched Python files
             _verify_patched_files(response, root_dir, conda_env)
         else:
             print("[HEALER] No valid patches found in healer response.")
+
+        # ── Verify the repair before advancing or halting ──
+        exit_code, test_output = run_tests(app_dir, conda_env)
+        if exit_code == 0:
+            print(f"[HEALER] ✓ Tests green after repair pass {iteration + 1}.")
+            log_telemetry(telemetry_file, task_desc, "SUCCESS", iteration + 1,
+                          "")
+            return True
 
     log_telemetry(telemetry_file, task_desc, "HALTED", max_retries,
                   test_output)
@@ -352,11 +366,12 @@ def _load_context_files(file_paths: list[str], root_dir: Path) -> str:
 
 def _extract_traceback_context(test_output: str, root_dir: Path) -> str:
     """
-    Parses pytest traceback output to find referenced source files,
+    Parses test runner output to find referenced source files under app/,
     then loads their content for the Healer's context.
-    Only loads files that actually exist under root_dir.
+    Extension-agnostic: matches any file path under app/ regardless of language.
+    Skips binary files and unreadable paths without raising.
     """
-    mentioned_files = re.findall(r'(app/[\w/._\-]+\.py)', test_output)
+    mentioned_files = re.findall(r'(app/[\w/._\-]+\.\w+)', test_output)
     seen = set()
     parts = []
 
@@ -365,9 +380,13 @@ def _extract_traceback_context(test_output: str, root_dir: Path) -> str:
             continue
         seen.add(rel_path)
         full = root_dir / rel_path
-        if full.exists():
+        if not full.exists():
+            continue
+        try:
             content = full.read_text(encoding="utf-8")
             parts.append(f"--- {rel_path} ---\n{content}")
+        except (UnicodeDecodeError, OSError):
+            continue
 
     return "\n\n".join(parts)
 
@@ -375,16 +394,16 @@ def _extract_traceback_context(test_output: str, root_dir: Path) -> str:
 def _verify_patched_files(surgeon_response: str, root_dir: Path,
                           conda_env: str) -> None:
     """
-    Runs syntax verification on all Python files mentioned in a Surgeon/Healer response.
+    Runs syntax verification on all files mentioned in a Surgeon/Healer response.
     Restores from snapshot if syntax check fails post-patch.
+    verify_syntax dispatches by extension and no-ops on unsupported types,
+    so no extension filter is needed here.
     """
     from engine.splicer import extract_file_chunks
     from engine.syntax import verify_syntax
 
     chunks = extract_file_chunks(surgeon_response)
     for rel_path, _ in chunks:
-        if not rel_path.endswith(".py"):
-            continue
         full_path = root_dir / rel_path
         if not full_path.exists():
             continue

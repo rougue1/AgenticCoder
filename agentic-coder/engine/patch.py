@@ -227,21 +227,32 @@ def _guard_full_rewrite(
 def _fuzzy_match(search_str: str, replace_str: str,
                  content: str) -> str | None:
     """
-    Fallback match that strips trailing whitespace from each line before comparing.
-    Handles the common case where the model generates trailing spaces that don't
-    exist in the actual file (or vice versa).
+    Fallback match that strips trailing whitespace per line for comparison only.
+    Locates the matching line range in the ORIGINAL content and splices the
+    replacement into only those lines — every untouched line is preserved
+    byte-identical to the original (no side-effect whitespace stripping).
     Returns the patched content string if match succeeds, None otherwise.
     """
-    search_stripped = "\n".join(line.rstrip()
-                                for line in search_str.splitlines())
-    content_stripped = "\n".join(line.rstrip()
-                                 for line in content.splitlines())
+    search_lines = search_str.splitlines()
+    content_lines = content.splitlines()
 
-    if search_stripped not in content_stripped:
+    if not search_lines:
         return None
 
-    # Apply to the stripped version, then return
-    return content_stripped.replace(search_stripped, replace_str, 1)
+    search_stripped = [line.rstrip() for line in search_lines]
+    content_stripped = [line.rstrip() for line in content_lines]
+    n = len(search_stripped)
+
+    for i in range(len(content_stripped) - n + 1):
+        if content_stripped[i:i + n] == search_stripped:
+            result_lines = (content_lines[:i] + replace_str.splitlines() +
+                            content_lines[i + n:])
+            result = "\n".join(result_lines)
+            if content.endswith("\n"):
+                result += "\n"
+            return result
+
+    return None
 
 
 def _find_closest_anchor(search_str: str, file_content: str) -> str:

@@ -51,6 +51,17 @@ def load_config(root_dir: Path | None = None) -> dict:
             import yaml  # PyYAML — installed in conda env
             with open(yaml_path, "r", encoding="utf-8") as f:
                 user_config = yaml.safe_load(f) or {}
+            # Compat alias: accept legacy 'api_base' in place of 'ollama_base_url'.
+            # Strips a trailing /v1 path segment that Ollama does not use for /api/chat.
+            if "api_base" in user_config and "ollama_base_url" not in user_config:
+                raw = user_config["api_base"].rstrip("/")
+                if raw.endswith("/v1"):
+                    raw = raw[:-3]
+                user_config["ollama_base_url"] = raw
+                print(
+                    "[CONFIG] Deprecated key 'api_base' detected — "
+                    "please rename to 'ollama_base_url' in agentic-coder.yaml."
+                )
             config = _deep_merge(config, user_config)
         except ImportError:
             print(
@@ -89,10 +100,14 @@ def get_model(tier: str, config: dict | None = None) -> str:
 def get_healer_escalation_model(config: dict | None = None) -> str:
     """
     Returns the escalation model for late-stage healer retries.
-    Defaults to the surgeon model (one tier up from healer).
+    Honors the top-level 'healer_escalation_model' key if set in config.
+    Falls back to the surgeon model.
     """
     if config is None:
         config = load_config()
+    explicit = config.get("healer_escalation_model")
+    if explicit:
+        return explicit
     return config.get("models", {}).get("surgeon",
                                         DEFAULTS["models"]["surgeon"])
 
@@ -129,10 +144,19 @@ def query_llm(
     model = override_model if override_model else get_model(tier, config)
     provider = config.get("provider", "ollama")
 
-    temperature = 0.0 if "coder" in model else 0.6
+    _tier_temps = config.get("temperature", {})
+    temperature = (_tier_temps.get(tier) if isinstance(_tier_temps, dict)
+                   and tier in _tier_temps else
+                   (0.0 if "coder" in model else 0.6))
+
+    _tier_tokens = config.get("max_tokens", {})
+    num_predict = (_tier_tokens.get(tier) if isinstance(_tier_tokens, dict)
+                   and tier in _tier_tokens else 4096)
+
     options = {
         "temperature": temperature,
         "num_ctx": config.get("context_window", 16384),
+        "num_predict": num_predict,
     }
 
     messages = []
@@ -141,6 +165,10 @@ def query_llm(
     messages.append({"role": "user", "content": user_prompt})
 
     print(f"  [{tier.upper()}] → {model}")
+
+    if config.get("debug_prompts", False):
+        print(f"  [DEBUG] system (first 500 chars):\n{system_prompt[:500]}")
+        print(f"  [DEBUG] user (first 500 chars):\n{user_prompt[:500]}")
 
     if provider == "ollama":
         return _call_ollama(
@@ -260,6 +288,7 @@ def _call_openai(model: str, messages: list, options: dict,
     response = client.chat.completions.create(
         model=model,
         messages=messages,
+        max_tokens=options.get("num_predict", 4096),
         temperature=options.get("temperature", 0.0),
     )
     return response.choices[0].message.content or ""
@@ -297,7 +326,7 @@ def _call_anthropic(model: str, messages: list, options: dict,
 
     response = client.messages.create(
         model=model,
-        max_tokens=8192,
+        max_tokens=options.get("num_predict", 8192),
         system=system_content,
         messages=user_messages,
         temperature=options.get("temperature", 0.0),
