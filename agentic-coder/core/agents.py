@@ -66,12 +66,13 @@ def get_architect_plan(
         "  2. Function/class/method signatures with parameter names and return types\n"
         "  3. All business logic rules and edge cases that must be handled\n"
         "  4. Integration points: how this connects to existing code\n"
-        "  5. Test strategy: specific pytest test cases to write including:\n"
+        "  5. Test strategy: specific test cases using the project's test framework\n"
+        "     as declared in steering. Include:\n"
         "     - Happy path assertions\n"
         "     - Edge cases (empty input, None, boundary values)\n"
         "     - Expected error handling (what should raise vs return None/False)\n"
         "  6. Any specific import statements or module structure requirements\n"
-        "  7. SQLAlchemy 2.x patterns to use (session.get() not query.get())\n"
+        "  7. Honor all data-access and framework patterns mandated in the steering context.\n"
         "  Do NOT tell the Surgeon to 'figure it out' — every decision must be explicit.\n"
     )
 
@@ -153,10 +154,8 @@ def execute_surgeon(
         "4. NEVER truncate, ellipsize (...), or summarize any code block.\n"
         "5. NEVER rewrite an entire existing file — use targeted patches only.\n"
         "6. Generate BOTH the feature implementation AND the test code in this single response.\n"
-        "7. Test files: backend tests → app/backend/tests/test_<name>.py (pytest)\n"
+        "7. Write tests in the location and framework mandated by structure.md and tech.md.\n"
         "8. Only import packages listed in the dependency ledger or Python stdlib.\n"
-        "9. Use SQLAlchemy 2.x patterns: db.session.get(Model, id) not Model.query.get(id)\n"
-        "10. All database assertions in tests must come AFTER db.session.commit()\n"
     )
 
     if fixture_list:
@@ -266,13 +265,11 @@ def execute_healer_loop(
             "2. Read the traceback carefully — find the EXACT file and line causing failure.\n"
             "3. Patch only the broken region. Do NOT restructure or rewrite the whole file.\n"
             "4. Verify your SEARCH string against the provided source code exactly.\n"
-            "5. Do NOT modify test files unless the test itself has an outright bug.\n"
-            "   Primary target is always application code.\n"
+            "5. Do NOT modify test files unless the test itself has an outright bug. Primary target is always application code.\n"
             "6. If the fix requires a new import, add it at the top of the file.\n"
-            "7. If the error is a missing fixture, add it to conftest.py — do not modify the test.\n"
-            "8. SQLAlchemy 2.x: use db.session.get(Model, id) not Model.query.get(id).\n"
-            "9. Assert ORM field values only AFTER db.session.commit().\n"
-            "10. Output ONLY the FILE/SEARCH/REPLACE blocks — no explanations.\n"
+            "7. If the error is a missing test fixture/helper, add it to the project's shared\n"
+            "   test setup file as defined in steering — do not modify the test.\n"
+            "8. Output ONLY the FILE/SEARCH/REPLACE blocks — no explanations.\n"
         )
 
         system_prompt = build_system_prompt(base_prompt, tier,

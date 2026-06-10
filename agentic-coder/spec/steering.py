@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -26,7 +27,7 @@ def load_steering_context(agent_dir: Path, tier: str) -> str:
     files_by_tier = {
         "architect": ["AGENTS.md", "structure.md"],
         "surgeon": ["AGENTS.md", "tech.md", "structure.md"],
-        "healer": ["AGENTS.md", "tech.md"],
+        "healer": ["AGENTS.md", "tech.md", "structure.md"],
         "validator": ["AGENTS.md", "tech.md"],
     }
 
@@ -111,6 +112,42 @@ def get_fixture_registry(app_dir: Path) -> list[str]:
     return fixtures
 
 
+def steering_needs_generation(steering_dir: Path, root_dir: Path) -> bool:
+    """
+    Returns True if steering files need to be (re)generated. Triggers when ANY of:
+        - steering_dir does not exist
+        - AGENTS.md, tech.md, or structure.md is missing
+        - .design_hash marker is missing
+        - sha256 of sdd-docs/design.md does not match the stored hash
+
+    Returns False without checking the hash if design.md does not exist yet
+    (SDD generation has not run) — steering will be re-evaluated once design.md
+    is written on a subsequent boot.
+    """
+    required_files = ["AGENTS.md", "tech.md", "structure.md"]
+    hash_path = steering_dir / ".design_hash"
+
+    if not steering_dir.exists():
+        return True
+    if any(not (steering_dir / f).exists() for f in required_files):
+        return True
+    if not hash_path.exists():
+        return True
+
+    # No design.md yet — can't compute a current hash; don't regenerate
+    design_content = read_design_doc(root_dir)
+    if not design_content:
+        return False
+
+    current_hash = hashlib.sha256(design_content.encode()).hexdigest()
+    try:
+        stored_hash = hash_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+
+    return current_hash != stored_hash
+
+
 def generate_steering_files(
     agent_dir: Path,
     root_dir: Path,
@@ -136,6 +173,11 @@ def generate_steering_files(
 
     if not design_content:
         _write_default_steering(steering_dir)
+        # Write a sentinel hash so this state is not re-attempted on every boot.
+        # Hash of empty bytes differs from any real design.md hash, so regeneration
+        # triggers automatically once design.md is populated by SDD generation.
+        hash_path = steering_dir / ".design_hash"
+        hash_path.write_text(hashlib.sha256(b"").hexdigest(), encoding="utf-8")
         return
 
     print("[STEERING] Generating project steering files from design.md...")
@@ -234,6 +276,12 @@ def generate_steering_files(
         print(
             f"[STEERING] Test runner config written: .agent/run.json → {test_command}"
         )
+
+    # Stamp the design hash so steering is not regenerated unless design.md changes.
+    # Written last — only reachable on full success, never on failed or default paths.
+    hash_path = steering_dir / ".design_hash"
+    hash_path.write_text(hashlib.sha256(design_content.encode()).hexdigest(),
+                         encoding="utf-8")
 
     print("[STEERING] Files written: AGENTS.md, tech.md, structure.md")
 

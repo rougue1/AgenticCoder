@@ -8,7 +8,7 @@ from engine.splicer import splice_multi_file_response, extract_file_chunks
 from engine.patch import cleanup_snapshots
 from spec.sdd import sdd_documents_exist, generate_sdd_documents
 from spec.tasks import get_next_task, commit_task_complete, count_tasks
-from spec.steering import generate_steering_files
+from spec.steering import generate_steering_files, steering_needs_generation
 from testing.preflight import validate_source_completeness, validate_test_correctness
 from testing.fixtures import ensure_init_files, check_fixture_drift, get_fixture_summary
 from tools.conda import ensure_conda_env
@@ -112,7 +112,7 @@ def boot() -> None:
 
     # ── Steering file generation (once per project) ──
     steering_dir = agent_dir / "steering"
-    if not steering_dir.exists() or not (steering_dir / "AGENTS.md").exists():
+    if steering_needs_generation(steering_dir, root_dir):
         generate_steering_files(agent_dir, root_dir)
 
     # ── Conda environment ──

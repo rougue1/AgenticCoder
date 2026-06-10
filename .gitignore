@@ -12,15 +12,14 @@ build/
 .venv/
 env/
 
-# Agent runtime files
-# .agent/checkpoint.json
-# healing_telemetry.jsonl
-# app/
-# *.bak
+# Agent runtime files — generated per-project, never committed
+.agent/checkpoint.json
+healing_telemetry.jsonl
+*.bak
 
-# Keep steering templates but not generated steering files
-# (remove the line below if you want to commit generated steering too)
-# .agent/steering/
+# Generated steering files and runtime config — project-specific, not for repo
+.agent/steering/
+.agent/run.json
 
 # VS Code
 .vscode/settings.json
@@ -30,9 +29,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# SDD docs
-# agentic-coder/sdd-docs/
+# SDD docs — generated per-project, uncomment to exclude
+agentic-coder/sdd-docs/
 
 # Initial new chat prompt and temporary files
 InitialNewChatPrompt*.md
 temp.txt
+gitignore.txt
