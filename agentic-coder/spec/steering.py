@@ -1,6 +1,8 @@
+import json
 import re
 from pathlib import Path
-from engine.llm import query_llm, load_config
+from engine.llm import query_llm, query_llm_with_json_retry, load_config
+from spec.sdd import read_design_doc
 
 
 def load_steering_context(agent_dir: Path, tier: str) -> str:
@@ -130,10 +132,7 @@ def generate_steering_files(
     steering_dir = agent_dir / "steering"
     steering_dir.mkdir(parents=True, exist_ok=True)
 
-    design_content = ""
-    design_path = root_dir / "sdd-docs" / "design.md"
-    if design_path.exists():
-        design_content = design_path.read_text(encoding="utf-8")
+    design_content = read_design_doc(root_dir)
 
     if not design_content:
         _write_default_steering(steering_dir)
@@ -145,15 +144,19 @@ def generate_steering_files(
         "You are a Lead Architect generating persistent steering context files for an "
         "autonomous AI coding agent system. These files will be injected into every "
         "future LLM prompt so agents always have project-specific knowledge.\n\n"
-        "Generate three steering documents based on the design.md provided.\n\n"
-        "Return a SINGLE valid JSON object with exactly three string keys. "
+        "FIRST — STACK DETECTION (complete this before writing any key):\n"
+        "Identify from the design document: the primary language(s), framework(s), "
+        "test framework, package manager, and runtime. Every rule you generate must be "
+        "specific to THAT stack — never assume Python, Flask, or pytest.\n\n"
+        "Return a SINGLE valid JSON object with exactly four keys. "
         "No markdown fences. No extra text.\n\n"
         "KEY 1 — 'agents' (AGENTS.md content):\n"
-        "  Universal coding conventions for this project. Include:\n"
-        "  - Import style (absolute vs relative, ordering)\n"
-        "  - Naming conventions (snake_case models, UPPER constants, etc.)\n"
-        "  - Error handling patterns (how exceptions should be caught and logged)\n"
-        "  - ORM patterns (session management, commit timing, relationship loading)\n"
+        "  Coding conventions specific to this project's detected language and framework. Include:\n"
+        "  - Import style appropriate to the language (module resolution order, aliasing rules)\n"
+        "  - Naming conventions matching the language's idioms (variables, constants, types, files)\n"
+        "  - Error handling patterns: how errors are caught, logged, and propagated in this stack\n"
+        "  - Data-access patterns: if the project uses a database or ORM, specify the correct\n"
+        "    session/transaction/connection management pattern and any deprecated APIs to avoid\n"
         "  - MANDATORY: Add this exact section verbatim:\n"
         "    ## Output Format Rules (NEVER violate these)\n"
         "    - NEVER wrap SEARCH or REPLACE content in ``` code fences\n"
@@ -163,39 +166,76 @@ def generate_steering_files(
         "    - Include enough surrounding lines in SEARCH to make the anchor unique\n"
         "    - NEVER truncate, ellipsize, or summarize code in REPLACE blocks\n\n"
         "KEY 2 — 'tech' (tech.md content):\n"
-        "  Technology constraints and patterns. Include:\n"
-        "  - Exact library versions and why (e.g., SQLAlchemy 2.x — use session.get() not query.get())\n"
-        "  - Framework-specific patterns (Flask app factory, Blueprint registration)\n"
-        "  - Patterns explicitly prohibited (e.g., no circular imports, no synchronous calls in async context)\n"
-        "  - Test framework rules (pytest fixture scopes, conftest locations)\n\n"
+        "  Technology constraints and patterns specific to this project's detected stack. Include:\n"
+        "  - Exact library/package versions required and the API patterns they mandate\n"
+        "    (for each version-sensitive API, name the correct current pattern AND the deprecated\n"
+        "     equivalent to avoid — e.g., for any ORM, name both the current and forbidden query style)\n"
+        "  - Framework-specific initialization, routing, and middleware patterns for this stack\n"
+        "  - Patterns explicitly prohibited for this stack\n"
+        "  - Test framework rules: how fixtures/setup work, test file naming, isolation requirements\n\n"
         "KEY 3 — 'structure' (structure.md content):\n"
-        "  Directory and file organization rules. Include:\n"
-        "  - Exact expected file tree for /app\n"
-        "  - Which __init__.py files must exist and what they export\n"
+        "  Directory and file organization rules for this project's layout. Include:\n"
+        "  - Exact expected file tree for the /app directory\n"
+        "  - Package/module initialization requirements for the detected language\n"
+        "    (e.g., __init__.py for Python packages; index files for JS/TS modules;\n"
+        "     mod.rs for Rust modules — use whichever applies)\n"
         "  - Where test files live relative to the code they test\n"
-        "  - Module boundary rules (what can import what)\n")
+        "  - Module boundary rules: what may import from what\n\n"
+        "KEY 4 — 'test_command' (JSON array of strings, required):\n"
+        "  The exact command to run the full test suite as a JSON array of strings.\n"
+        "  Derive this from the test framework identified in the design document.\n"
+        "  Examples by stack:\n"
+        "    Python/pytest:  [\"pytest\", \"--tb=short\", \"-v\"]\n"
+        "    Node/npm:       [\"npm\", \"test\"]\n"
+        "    Node/vitest:    [\"npx\", \"vitest\", \"run\", \"--reporter=verbose\"]\n"
+        "    Go:             [\"go\", \"test\", \"./...\"]\n"
+        "    Rust/cargo:     [\"cargo\", \"test\"]\n"
+        "    Java/Maven:     [\"mvn\", \"test\"]\n\n"
+        "OPTIONAL KEY — 'test_cwd' (string):\n"
+        "  Working directory relative to the project root where the test command runs.\n"
+        "  Omit this key entirely if the project root is the correct working directory.\n"
+        "  Example: 'app' or 'app/backend'\n")
 
     user_prompt = (
         f"Generate steering files for this project:\n\n{design_content}")
 
-    try:
-        from engine.llm import clean_and_parse_json
-        response = query_llm("architect", system_prompt, user_prompt, config)
-        data = clean_and_parse_json(response)
+    data = query_llm_with_json_retry(
+        tier="architect",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        config=config,
+        expected_keys=["agents", "tech", "structure", "test_command"],
+        context_label="Steering files",
+        fatal=False,
+    )
 
-        agents_content = _prepend_universal_rules(data.get("agents", ""))
-        (steering_dir / "AGENTS.md").write_text(agents_content,
-                                                encoding="utf-8")
-        (steering_dir / "tech.md").write_text(data.get("tech", ""),
-                                              encoding="utf-8")
-        (steering_dir / "structure.md").write_text(data.get("structure", ""),
-                                                   encoding="utf-8")
-
-        print("[STEERING] Files written: AGENTS.md, tech.md, structure.md")
-
-    except Exception as e:
-        print(f"[WARN] Steering file generation failed: {e}. Using defaults.")
+    if data is None:
+        print(
+            "[WARN] Steering generation failed after retries. Using defaults.")
         _write_default_steering(steering_dir)
+        return
+
+    agents_content = _prepend_universal_rules(data.get("agents", ""))
+    (steering_dir / "AGENTS.md").write_text(agents_content, encoding="utf-8")
+    (steering_dir / "tech.md").write_text(data.get("tech", ""),
+                                          encoding="utf-8")
+    (steering_dir / "structure.md").write_text(data.get("structure", ""),
+                                               encoding="utf-8")
+
+    # Write machine-readable test runner config to .agent/run.json
+    test_command = data.get("test_command")
+    if isinstance(test_command, list) and test_command:
+        run_config: dict = {"test_command": test_command}
+        test_cwd = data.get("test_cwd")
+        if test_cwd:
+            run_config["test_cwd"] = test_cwd
+        (agent_dir / "run.json").write_text(json.dumps(run_config, indent=2),
+                                            encoding="utf-8")
+        print(
+            f"[STEERING] Test runner config written: .agent/run.json → {test_command}"
+        )
+
+    print("[STEERING] Files written: AGENTS.md, tech.md, structure.md")
 
 
 def _prepend_universal_rules(agent_content: str) -> str:
@@ -224,23 +264,49 @@ def _prepend_universal_rules(agent_content: str) -> str:
 
 def _write_default_steering(steering_dir: Path) -> None:
     """
-    Writes minimal default steering files when design.md is unavailable
-    or Architect steering generation fails. Contains universal rules only.
+    Writes minimal stack-neutral default steering files when design.md is
+    unavailable or LLM steering generation fails after retries.
+
+    AGENTS.md: universal output-format rules + language-agnostic conventions.
+    tech.md:   empty placeholder — no stack assumptions.
+    structure.md: empty placeholder — no layout assumptions.
+
+    Both tech.md and structure.md explicitly signal that real rules are missing
+    so agents running on defaults produce a visible diagnostic in their context
+    rather than silently applying wrong-stack conventions.
     """
+
     agents_md = _prepend_universal_rules(
         "## General Conventions\n\n"
-        "- Use snake_case for all Python identifiers\n"
-        "- Use absolute imports within the project\n"
-        "- All database operations must occur within an application context\n"
-        "- Commit database sessions explicitly — never rely on autocommit\n")
+        "- Follow the naming idioms of the project's primary language\n"
+        "- Use explicit imports — never wildcard or star imports\n"
+        "- Catch specific error types — never use bare or empty catch blocks\n"
+        "- If the project uses a database, perform all operations within the\n"
+        "  framework's prescribed session or connection scope\n"
+        "- If the project uses a database, commit or finalize transactions\n"
+        "  explicitly — never rely on autocommit\n")
+
     (steering_dir / "AGENTS.md").write_text(agents_md, encoding="utf-8")
+
     (steering_dir / "tech.md").write_text(
-        "## Tech Stack\n\n- Python 3.11\n- Flask 3.x\n- SQLAlchemy 2.x\n- pytest\n",
+        "## Tech Stack\n\n"
+        "Stack-specific rules have not been generated yet.\n"
+        "This file is populated automatically from design.md on first run.\n"
+        "If you see this message in an agent prompt, steering generation failed —\n"
+        "check that sdd-docs/design.md exists and that Ollama is reachable.\n",
         encoding="utf-8",
     )
+
     (steering_dir / "structure.md").write_text(
-        "## Directory Structure\n\n- app/backend/ — Flask application\n"
-        "- app/backend/tests/ — pytest test suite\n",
+        "## Directory Structure\n\n"
+        "Directory layout rules have not been generated yet.\n"
+        "This file is populated automatically from design.md on first run.\n"
+        "If you see this message in an agent prompt, steering generation failed —\n"
+        "check that sdd-docs/design.md exists and that Ollama is reachable.\n",
         encoding="utf-8",
     )
-    print("[STEERING] Default steering files written.")
+
+    print(
+        "[STEERING] Default (stack-neutral) steering files written.\n"
+        "           Stack-specific rules will be generated once design.md is available."
+    )

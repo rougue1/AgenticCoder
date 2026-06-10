@@ -346,7 +346,8 @@ def query_llm_with_json_retry(
     config: dict,
     expected_keys: list[str],
     context_label: str,
-) -> dict:
+    fatal: bool = True,
+) -> dict | None:
     """
     Wraps query_llm with a bounded corrective-retry loop for calls that must
     return a JSON object. Implements the hard constraint: retry up to 2 times
@@ -396,4 +397,6 @@ def query_llm_with_json_retry(
         print(
             f"[CRITICAL] {context_label} JSON parse failed after 2 retries: {e}\n"
             f"Raw (first 500): {response[:500]}")
-        sys.exit(1)
+        if fatal:
+            sys.exit(1)
+        return None
