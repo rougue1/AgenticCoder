@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from fnmatch import fnmatch
 from pathlib import Path
 
 from engine.llm import load_config
@@ -11,7 +12,8 @@ from spec.tasks import get_next_task, commit_task_complete, count_tasks
 from spec.steering import generate_steering_files, steering_needs_generation
 from testing.preflight import validate_source_completeness, validate_test_correctness
 from testing.fixtures import ensure_init_files, check_fixture_drift, get_fixture_summary
-from tools.conda import ensure_conda_env
+from testing.runner import load_run_config
+from tools.conda import ensure_conda_env, install_bootstrap_packages
 from tools.deps import update_dependencies
 from core.agents import get_architect_plan, execute_surgeon, execute_healer_loop
 from core.telemetry import log_telemetry, print_summary, start_timer, format_duration
@@ -117,7 +119,16 @@ def boot() -> None:
         generate_steering_files(agent_dir, root_dir)
 
     # ── Conda environment ──
-    ensure_conda_env(conda_env)
+    python_version = config.get("python_version", "3.11")
+    env_created = ensure_conda_env(conda_env, python_version)
+
+    # ── Bootstrap packages from run.json (installed once on fresh env creation) ──
+    if env_created:
+        _boot_run_cfg = load_run_config(root_dir)
+        if _boot_run_cfg:
+            bootstrap = _boot_run_cfg.get("bootstrap_packages", [])
+            if bootstrap:
+                install_bootstrap_packages(bootstrap, conda_env)
 
     # ── Print initial task queue state ──
     completed, total = count_tasks(sdd_dir / "tasks.md")
@@ -147,7 +158,7 @@ def boot() -> None:
         print(f"\n{'═' * 60}")
         print(f"  TASK {task_index}/{total}")
         print(f"  {active_task[:72]}")
-        print(f"{'═' * 60}")
+        print(f"{'\u2550' * 60}")
 
         cycle_start = start_timer()
         success = run_task_cycle(
@@ -216,12 +227,12 @@ def run_task_cycle(
     # ── Step 5: Pre-flight source completeness check ──
     validate_source_completeness(context_files, task_desc, root_dir, app_dir)
 
-    # ── Step 6: Collect newly written test files ──
-    import time as _time
-    recent_cutoff = _time.time() - 180  # files written in last 3 minutes
+    # ── Step 6: Collect newly written test files from Surgeon output ──
+    _run_cfg = load_run_config(root_dir)
+    _test_glob = _run_cfg.get("test_file_glob", "test_*.py") if _run_cfg else "test_*.py"
     new_test_files = [
-        str(p.relative_to(root_dir)) for p in (app_dir).rglob("test_*.py")
-        if p.stat().st_mtime > recent_cutoff
+        p for p, _ in extract_file_chunks(surgeon_output)
+        if fnmatch(Path(p).name, _test_glob)
     ]
 
     # ── Step 7: Pre-flight test correctness check ──
