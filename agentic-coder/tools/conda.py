@@ -4,12 +4,18 @@ import sys
 from pathlib import Path
 
 
-def ensure_conda_env(env_name: str) -> None:
+def ensure_conda_env(env_name: str, python_version: str = "3.11") -> bool:
     """
     Verifies the isolated Conda environment exists.
-    Creates it with Python 3.11, Node.js, and pytest if absent.
+    Creates it with the requested Python version if absent. Stack-specific
+    packages (test framework, plugins, CLI tools) are installed separately
+    by install_bootstrap_packages() using the bootstrap_packages list in run.json.
     Exits the entire process on Conda not found or creation failure —
     there is no recovery path without a working execution environment.
+
+    Returns True if the environment was just created, False if it already existed.
+    The caller uses this to gate bootstrap package installation so resumed
+    sessions do not incur a repeated pip subprocess.
     """
     print(f"[CONDA] Checking environment '{env_name}'...")
 
@@ -22,10 +28,10 @@ def ensure_conda_env(env_name: str) -> None:
 
     if conda_env_exists(env_name):
         print(f"[CONDA] Environment '{env_name}' is ready.")
-        return
+        return False
 
     print(
-        f"[CONDA] Creating environment '{env_name}' with Python 3.11 + Node.js + pytest..."
+        f"[CONDA] Creating environment '{env_name}' with Python {python_version}..."
     )
     try:
         subprocess.run(
@@ -35,10 +41,7 @@ def ensure_conda_env(env_name: str) -> None:
                 "-y",
                 "-n",
                 env_name,
-                "python=3.11",
-                "nodejs",
-                "pytest",
-                "pytest-flask",
+                f"python={python_version}",
             ],
             check=True,
         )
@@ -46,6 +49,31 @@ def ensure_conda_env(env_name: str) -> None:
     except subprocess.CalledProcessError as e:
         print(f"[CRITICAL] Conda environment creation failed: {e}")
         sys.exit(1)
+
+    return True
+
+
+def install_bootstrap_packages(
+    packages: list[str],
+    conda_env: str,
+) -> None:
+    """
+    Installs the bootstrap package list from .agent/run.json into the conda
+    environment using pip. Called once immediately after a fresh environment
+    is created, before the first task cycle.
+
+    Non-fatal: logs a warning on failure rather than halting. The per-task
+    dependency scanner will attempt to recover any missing packages anyway.
+    """
+    if not packages:
+        return
+    print(f"[CONDA] Installing bootstrap packages: {packages}")
+    success = install_packages(packages, "pip", conda_env)
+    if not success:
+        print(
+            "[WARN] Some bootstrap packages failed to install. "
+            "The pipeline will continue — the dependency scanner may recover."
+        )
 
 
 def conda_env_exists(env_name: str) -> bool:
