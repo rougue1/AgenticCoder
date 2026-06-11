@@ -226,7 +226,7 @@ def execute_healer_loop(
 
     # ── Initial test run (always runs, even when max_healer_retries = 0) ──
     print("[HEALER] Running initial test suite...")
-    exit_code, test_output = run_tests(app_dir, conda_env)
+    exit_code, test_output = run_tests(app_dir, conda_env, root_dir)
 
     if exit_code == 0:
         print("[HEALER] ✓ All tests passing on first run.")
@@ -302,7 +302,7 @@ def execute_healer_loop(
             print("[HEALER] No valid patches found in healer response.")
 
         # ── Verify the repair before advancing or halting ──
-        exit_code, test_output = run_tests(app_dir, conda_env)
+        exit_code, test_output = run_tests(app_dir, conda_env, root_dir)
         if exit_code == 0:
             print(f"[HEALER] ✓ Tests green after repair pass {iteration + 1}.")
             log_telemetry(telemetry_file, task_desc, "SUCCESS", iteration + 1,
