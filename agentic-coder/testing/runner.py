@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from tools.conda import run_in_env
@@ -7,20 +8,34 @@ from tools.conda import run_in_env
 # ==========================================
 
 
-def run_tests(app_dir: Path, conda_env: str) -> tuple[int, str]:
+def run_tests(
+    app_dir: Path,
+    conda_env: str,
+    root_dir: Path | None = None,
+) -> tuple[int, str]:
     """
-    Main test runner entry point. Detects project structure and dispatches
-    to the appropriate test tier(s).
+    Main test runner entry point.
 
-    Detection logic:
-        - Full-stack (backend/ + frontend/): run unit + integration + frontend
-        - Backend only (backend/ exists, no frontend/): run unit + integration
-        - Flat structure (no backend/ subdir): run pytest from app_dir root
+    Primary path: when root_dir is provided, loads .agent/run.json and executes
+    the stack-declared test_command in test_cwd. This is the authoritative path
+    for all projects that have completed steering generation.
+
+    Legacy fallback (when run.json is absent or root_dir is not provided): detects
+    project structure and dispatches to tiered pytest/vitest execution.
+    Retained for one milestone, then removed in a cleanup pass.
 
     Returns (exit_code, combined_output).
     exit_code 0 = all passing tiers green.
     exit_code non-zero = at least one required tier failed.
     """
+    # ── Primary: run.json-driven execution ──
+    if root_dir is not None:
+        run_config = load_run_config(root_dir)
+        if run_config is not None:
+            return _run_from_config(run_config, app_dir, conda_env, root_dir)
+
+    # ── Legacy fallback: tiered structure detection ──
+    print("[RUNNER] No run.json found — using legacy structure detection.")
     backend_dir = app_dir / "backend"
     frontend_dir = app_dir / "frontend"
 
@@ -93,11 +108,10 @@ def run_integration_tests(app_dir: Path, conda_env: str) -> tuple[int, str]:
     integration_dir = app_dir / "backend" / "tests" / "integration"
 
     if not integration_dir.exists():
-        # No dedicated integration folder — run all tests but mark as integration pass
         print(
-            "[RUNNER] No integration/ subfolder — treating full test suite as unit+integration."
+            "[RUNNER] No integration/ subfolder — unit suite is authoritative."
         )
-        return _run_pytest(app_dir, conda_env, test_path="backend/tests/")
+        return 0, "No dedicated integration directory — unit tier covers full scope."
 
     if not any(integration_dir.rglob("test_*.py")):
         print("[RUNNER] No integration test files found — skipping.")
@@ -185,6 +199,27 @@ def aggregate_results(results: list[tuple[str, int, str]]) -> tuple[int, str]:
     return final_code, combined_output
 
 
+def load_run_config(root_dir: Path) -> dict | None:
+    """
+    Loads .agent/run.json and returns the parsed dict if valid.
+    Returns None if the file is absent, unparseable, or lacks a non-empty
+    test_command array. Public so the orchestrator and conda bootstrap
+    can read test_file_glob and bootstrap_packages without re-parsing.
+    """
+    run_json = root_dir / ".agent" / "run.json"
+    if not run_json.exists():
+        return None
+    try:
+        data = json.loads(run_json.read_text(encoding="utf-8"))
+        if isinstance(data.get("test_command"), list) and data["test_command"]:
+            return data
+        print("[RUNNER] run.json found but 'test_command' is missing or empty.")
+        return None
+    except Exception as e:
+        print(f"[RUNNER] Failed to parse run.json: {e}")
+        return None
+
+
 # ==========================================
 # PRIVATE HELPERS
 # ==========================================
@@ -213,6 +248,31 @@ def _run_pytest(
         cmd,
         conda_env,
         cwd=app_dir,
+        extra_env={"CI": "true"},
+        timeout=300,
+    )
+
+
+def _run_from_config(
+    run_config: dict,
+    app_dir: Path,
+    conda_env: str,
+    root_dir: Path,
+) -> tuple[int, str]:
+    """
+    Executes the test suite using the command and working directory declared
+    in run.json. test_cwd is resolved relative to root_dir; defaults to
+    root_dir when the key is absent.
+    """
+    cmd = run_config["test_command"]
+    test_cwd_str = run_config.get("test_cwd")
+    cwd = (root_dir / test_cwd_str) if test_cwd_str else root_dir
+
+    print(f"[RUNNER] Running via run.json: {' '.join(cmd)}")
+    return run_in_env(
+        cmd,
+        conda_env,
+        cwd=cwd,
         extra_env={"CI": "true"},
         timeout=300,
     )
