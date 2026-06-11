@@ -118,6 +118,7 @@ def steering_needs_generation(steering_dir: Path, root_dir: Path) -> bool:
         - steering_dir does not exist
         - AGENTS.md, tech.md, or structure.md is missing
         - .design_hash marker is missing
+        - .agent/run.json is missing
         - sha256 of sdd-docs/design.md does not match the stored hash
 
     Returns False without checking the hash if design.md does not exist yet
@@ -126,12 +127,15 @@ def steering_needs_generation(steering_dir: Path, root_dir: Path) -> bool:
     """
     required_files = ["AGENTS.md", "tech.md", "structure.md"]
     hash_path = steering_dir / ".design_hash"
+    run_json_path = steering_dir.parent / "run.json"  # .agent/run.json
 
     if not steering_dir.exists():
         return True
     if any(not (steering_dir / f).exists() for f in required_files):
         return True
     if not hash_path.exists():
+        return True
+    if not run_json_path.exists():
         return True
 
     # No design.md yet — can't compute a current hash; don't regenerate
@@ -236,7 +240,23 @@ def generate_steering_files(
         "OPTIONAL KEY — 'test_cwd' (string):\n"
         "  Working directory relative to the project root where the test command runs.\n"
         "  Omit this key entirely if the project root is the correct working directory.\n"
-        "  Example: 'app' or 'app/backend'\n")
+        "  Example: 'app' or 'app/backend'\n\n"
+        "OPTIONAL KEY — 'test_file_glob' (string):\n"
+        "  Filename glob pattern used to identify test source files for this stack.\n"
+        "  The pipeline uses this to detect which files the Surgeon wrote as tests.\n"
+        "  Examples: 'test_*.py' (pytest), '*.test.ts' (vitest/jest),\n"
+        "  '*_test.go' (Go), '*_spec.rb' (RSpec).\n"
+        "  Omit this key if 'test_*.py' is correct for this project.\n\n"
+        "OPTIONAL KEY — 'bootstrap_packages' (JSON array of strings):\n"
+        "  Packages the conda environment must have installed before the first task\n"
+        "  cycle runs. Include the test framework, test plugins, and any CLI tools\n"
+        "  the test_command requires. Do NOT include application dependencies — those\n"
+        "  are detected and installed by the dependency scanner after each task.\n"
+        "  Examples by stack:\n"
+        "    Python/pytest:    [\"pytest\", \"pytest-flask\", \"pytest-cov\"]\n"
+        "    Python/FastAPI:   [\"pytest\", \"httpx\", \"pytest-asyncio\"]\n"
+        "    Node (vitest/npm): []  — npm manages all JS deps, leave empty\n"
+        "    Go / Rust:         []  — test runner is built into the toolchain\n")
 
     user_prompt = (
         f"Generate steering files for this project:\n\n{design_content}")
@@ -268,9 +288,12 @@ def generate_steering_files(
     test_command = data.get("test_command")
     if isinstance(test_command, list) and test_command:
         run_config: dict = {"test_command": test_command}
-        test_cwd = data.get("test_cwd")
-        if test_cwd:
-            run_config["test_cwd"] = test_cwd
+        if data.get("test_cwd"):
+            run_config["test_cwd"] = data["test_cwd"]
+        if data.get("test_file_glob"):
+            run_config["test_file_glob"] = data["test_file_glob"]
+        if isinstance(data.get("bootstrap_packages"), list):
+            run_config["bootstrap_packages"] = data["bootstrap_packages"]
         (agent_dir / "run.json").write_text(json.dumps(run_config, indent=2),
                                             encoding="utf-8")
         print(
