@@ -84,6 +84,11 @@ def splice_multi_file_response(ai_response: str, root_dir: Path) -> list[str]:
             patched.append(relative_path)
         # On failure: continue to next file rather than aborting
 
+    if len(patched) < len(chunks):
+        failed = [p for p, _ in chunks if p not in patched]
+        print(f"[SPLICE] Applied {len(patched)}/{len(chunks)} file patch(es). "
+              f"Failed: {', '.join(failed)}")
+
     return patched
 
 

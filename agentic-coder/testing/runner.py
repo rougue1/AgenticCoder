@@ -396,12 +396,28 @@ def failing_test_names(
         if not failure_line.search(line):
             continue
         for name in candidates:
-            if name in line and name not in failing:
+            if name not in failing and _name_mentioned(name, line):
                 failing.append(name)
 
     if not failing and not strict:
-        failing = [n for n in candidates if n in test_output]
+        failing = [n for n in candidates if _name_mentioned(n, test_output)]
     return failing
+
+
+def _name_mentioned(name: str, text: str) -> bool:
+    """
+    Whole-name occurrence check: the name must not be flanked by identifier
+    characters, so 'test_add' never matches inside 'test_add_two'. Names from
+    string-based declarations (it('...')) may contain regex metacharacters,
+    hence re.escape rather than \\b anchors (which fail on non-word edges).
+    """
+    for match in re.finditer(re.escape(name), text):
+        before = text[match.start() - 1] if match.start() > 0 else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        if (not (before.isalnum() or before == "_")
+                and not (after.isalnum() or after == "_")):
+            return True
+    return False
 
 
 def extract_function_source(

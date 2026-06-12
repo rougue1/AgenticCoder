@@ -61,7 +61,7 @@ def validate_source_completeness(
 
         if fixes:
             print(f"[PREFLIGHT] Applying {len(fixes)} auto-fix(es)...")
-            apply_validated_fixes(fixes, root_dir)
+            apply_validation_fixes(fixes, root_dir)
 
         if not ready:
             print(
@@ -136,8 +136,13 @@ def validate_test_correctness(
         print(
             "[PREFLIGHT] Test issues detected — applying pre-run corrections..."
         )
-        splice_multi_file_response(response, root_dir)
-        print("[PREFLIGHT] ✓ Test corrections applied.")
+        patched = splice_multi_file_response(response, root_dir)
+        if patched:
+            print(f"[PREFLIGHT] ✓ Test corrections applied to {len(patched)} "
+                  "file(s).")
+        else:
+            print("[PREFLIGHT] Validator flagged issues but produced no "
+                  "applicable patches — proceeding with tests as written.")
         return True
 
     except Exception as e:

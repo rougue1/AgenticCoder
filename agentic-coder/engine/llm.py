@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -227,43 +228,56 @@ def _call_ollama(
         headers={"Content-Type": "application/json"},
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
+    # Transient failures (connection refused during a model reload, socket
+    # timeout while a large model loads) are retried with backoff before
+    # giving up — a single hiccup must not abort a multi-hour unattended run.
+    # HTTP errors (e.g. model not found) are immediately fatal.
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
 
-            content = res_data.get("message", {}).get("content", "")
+                content = res_data.get("message", {}).get("content", "")
 
-            if not content:
-                print(
-                    f"[WARN] Empty response from Ollama for model '{model}'.")
-                return ""
+                if not content:
+                    print(
+                        f"[WARN] Empty response from Ollama for model '{model}'.")
+                    return ""
 
-            # Strip DeepSeek-R1 chain-of-thought reasoning block
-            if "</think>" in content:
-                content = content.split("</think>")[-1].strip()
+                # Strip DeepSeek-R1 chain-of-thought reasoning block
+                if "</think>" in content:
+                    content = content.split("</think>")[-1].strip()
 
-            return content
+                return content
 
-    except urllib.error.URLError as e:
-        print(f"[CRITICAL] Cannot reach Ollama at {url}.")
-        print(f"           Is Ollama running? Run: ollama serve")
-        print(f"           Error: {e}")
-        sys.exit(1)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(
-            f"[CRITICAL] Ollama HTTP {e.code} for model '{model}': {body[:300]}"
-        )
-        sys.exit(1)
-    except KeyError:
-        print(
-            f"[CRITICAL] Unexpected Ollama response shape for '{model}'. Raw: {str(res_data)[:300]}"
-        )
-        sys.exit(1)
-    except Exception as e:
-        print(
-            f"[CRITICAL] Unexpected error calling Ollama model '{model}': {e}")
-        sys.exit(1)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(
+                f"[CRITICAL] Ollama HTTP {e.code} for model '{model}': {body[:300]}"
+            )
+            sys.exit(1)
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < max_attempts:
+                wait = 10 * attempt
+                print(f"[LLM] Ollama request failed ({e}) — retrying in "
+                      f"{wait}s (attempt {attempt}/{max_attempts})...")
+                time.sleep(wait)
+                continue
+            print(f"[CRITICAL] Cannot reach Ollama at {url} after "
+                  f"{max_attempts} attempts.")
+            print(f"           Is Ollama running? Run: ollama serve")
+            print(f"           Error: {e}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(
+                f"[CRITICAL] Unexpected Ollama response shape for '{model}': {e}"
+            )
+            sys.exit(1)
+        except Exception as e:
+            print(
+                f"[CRITICAL] Unexpected error calling Ollama model '{model}': {e}")
+            sys.exit(1)
 
 
 def _call_openai(model: str, messages: list, options: dict,
@@ -403,33 +417,41 @@ def query_llm_with_json_retry(
     """
 
     response = query_llm(tier, system_prompt, user_prompt, config)
+    last_error = ""
 
-    # Hard constraint: retry up to 2 times with a corrective prompt before halting.
-    for attempt in range(2):  # attempts 0 and 1 = two corrective retry passes
+    # Hard constraint: retry up to 2 times with a corrective prompt before
+    # halting. A response that parses but lacks a required key is just as
+    # unusable as unparseable JSON, so both spend the same retry budget.
+    for attempt in range(3):  # initial response + two corrective retries
         try:
-            return clean_and_parse_json(response)
+            parsed = clean_and_parse_json(response)
+            missing = [k for k in expected_keys if k not in parsed]
+            if not missing:
+                return parsed
+            last_error = f"missing required key(s): {', '.join(missing)}"
         except json.JSONDecodeError as e:
-            print(
-                f"[{tier.upper()}] {context_label} JSON parse failed "
-                f"(attempt {attempt + 1}/3) — issuing corrective reprompt...")
-            keys_desc = "\n".join(f"  '{k}': ..." for k in expected_keys)
-            corrective_user = (
-                f"Your previous response could not be parsed as JSON.\n"
-                f"Error: {e}\n"
-                f"Your output (first 500 chars):\n{response[:500]}\n\n"
-                f"Return ONLY a valid JSON object with exactly "
-                f"{len(expected_keys)} key(s):\n{keys_desc}\n"
-                f"No markdown fences. No explanation. No text before or after the JSON."
-            )
-            response = query_llm(tier, system_prompt, corrective_user, config)
+            last_error = f"not valid JSON: {e}"
 
-    # Final attempt after two corrective retries
-    try:
-        return clean_and_parse_json(response)
-    except json.JSONDecodeError as e:
-        print(
-            f"[CRITICAL] {context_label} JSON parse failed after 2 retries: {e}\n"
-            f"Raw (first 500): {response[:500]}")
-        if fatal:
-            sys.exit(1)
-        return None
+        if attempt == 2:
+            break
+
+        print(f"[{tier.upper()}] {context_label} response unusable "
+              f"({last_error}) — corrective reprompt "
+              f"(attempt {attempt + 1}/3)...")
+        keys_desc = "\n".join(f"  '{k}': ..." for k in expected_keys)
+        corrective_user = (
+            f"Your previous response was unusable.\n"
+            f"Problem: {last_error}\n"
+            f"Your output (first 500 chars):\n{response[:500]}\n\n"
+            f"Return ONLY a valid JSON object containing at least these "
+            f"{len(expected_keys)} key(s):\n{keys_desc}\n"
+            f"No markdown fences. No explanation. No text before or after the JSON."
+        )
+        response = query_llm(tier, system_prompt, corrective_user, config)
+
+    print(f"[CRITICAL] {context_label} failed after 2 corrective retries: "
+          f"{last_error}\n"
+          f"Raw (first 500): {response[:500]}")
+    if fatal:
+        sys.exit(1)
+    return None

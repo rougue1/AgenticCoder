@@ -185,6 +185,7 @@ def boot() -> None:
     )
 
     task_index = completed
+    last_successful_task = None
 
     # ══════════════════════════════════
     # MAIN TASK LOOP
@@ -200,13 +201,25 @@ def boot() -> None:
             clear_checkpoint(root_dir)
             sys.exit(0)
 
+        # Guard against an infinite loop: if the task that just completed is
+        # still the next unchecked task, commit_task_complete() failed to
+        # update tasks.md and rerunning would repeat the same cycle forever.
+        if active_task == last_successful_task:
+            print(
+                "\n[HALT] Task completed but could not be marked [x] in tasks.md —\n"
+                "       rerunning would repeat the same task forever.\n"
+                f"       Mark it complete manually and rerun:\n"
+                f"       {active_task[:100]}")
+            print_summary(telemetry_file)
+            sys.exit(1)
+
         task_index += 1
         _, total = count_tasks(sdd_dir / "tasks.md")
 
         print(f"\n{'═' * 60}")
         print(f"  TASK {task_index}/{total}")
         print(f"  {active_task[:72]}")
-        print(f"{'\u2550' * 60}")
+        print("\u2550" * 60)
 
         cycle_start = start_timer()
         success = run_task_cycle(
@@ -218,9 +231,11 @@ def boot() -> None:
             app_dir=app_dir,
             conda_env=conda_env,
             telemetry_file=telemetry_file,
+            cycle_start=cycle_start,
         )
 
         if success:
+            last_successful_task = active_task
             duration = time.time() - cycle_start
             print(
                 f"\n[CYCLE] ✓ Task complete in {format_duration(duration)}. Advancing...\n"
@@ -241,6 +256,7 @@ def run_task_cycle(
     app_dir: Path,
     conda_env: str,
     telemetry_file: Path,
+    cycle_start: float | None = None,
 ) -> bool:
     """
     Executes the full agent pipeline for a single task:
@@ -340,6 +356,7 @@ def run_task_cycle(
         telemetry_file=telemetry_file,
         new_tests=new_tests,
         task_index=task_index,
+        cycle_start=cycle_start,
     )
 
     if not success:

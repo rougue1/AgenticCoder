@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from pathlib import Path
 
 from engine.llm import query_llm, clean_and_parse_json, load_config, get_healer_escalation_model, query_llm_with_json_retry
@@ -177,6 +178,7 @@ def execute_healer_loop(
     telemetry_file: Path,
     new_tests: list[dict] | None = None,
     task_index: int = 0,
+    cycle_start: float | None = None,
 ) -> tuple[bool, int]:
     """
     Tier 3 — Healer (Qwen-2.5-Coder-7B → escalates to 14B/32B):
@@ -210,6 +212,9 @@ def execute_healer_loop(
     escalate_after = config.get("healer_escalate_after", 1)
     context_budget = config.get("healer_context_budget", 6000)
 
+    def _elapsed() -> float:
+        return time.time() - cycle_start if cycle_start else 0.0
+
     stack_profile = load_stack_profile(root_dir / ".agent")
     phases = _build_phase_plan(root_dir, app_dir, conda_env, new_tests or [],
                                task_index, config, stack_profile)
@@ -227,7 +232,8 @@ def execute_healer_loop(
         while exit_code != 0:
             if repairs_used >= max_retries:
                 log_telemetry(telemetry_file, task_desc, "HALTED",
-                              repairs_used, test_output)
+                              repairs_used, test_output,
+                              duration_s=_elapsed())
                 print(
                     f"[CRITICAL] Healer exhausted {max_retries} repair attempts. "
                     "Manual intervention required.")
@@ -236,7 +242,7 @@ def execute_healer_loop(
             print(f"[HEALER] {phase['label']} failed (exit {exit_code}) — "
                   f"repair pass {repairs_used + 1}/{max_retries}...")
             log_telemetry(telemetry_file, task_desc, "FAIL_ATTEMPT",
-                          repairs_used, test_output)
+                          repairs_used, test_output, duration_s=_elapsed())
 
             # Determine which model to use for this repair pass
             use_escalated = repairs_used >= escalate_after
@@ -318,7 +324,8 @@ def execute_healer_loop(
         else:
             print(f"[HEALER] ✓ {phase['label']} green.")
 
-    log_telemetry(telemetry_file, task_desc, "SUCCESS", repairs_used, "")
+    log_telemetry(telemetry_file, task_desc, "SUCCESS", repairs_used, "",
+                  duration_s=_elapsed())
     return True, 0
 
 

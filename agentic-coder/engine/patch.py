@@ -134,7 +134,7 @@ def apply_search_replace_block(file_path: Path, block_text: str,
             return False
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text("\n".join(new_parts), encoding="utf-8")
+        file_path.write_text("\n".join(new_parts) + "\n", encoding="utf-8")
         print(f"  [CREATE] {file_path.relative_to(root_dir)}")
         return True
 
