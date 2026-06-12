@@ -59,13 +59,33 @@ temperature:
     healer: 0.15
     validator: 0.1
 
-# Max tokens per LLM call. Increase if models are truncating output.
-# Warning: very high values slow inference on smaller GPUs.
+# Max tokens per LLM call (num_predict). Increase if models are truncating
+# output. Kept finite deliberately: with request_timeout 0 this is the only
+# guard against a model stuck in a repetition loop generating forever.
+# Architect is highest — DeepSeek-R1 burns tokens on <think> reasoning
+# before its answer.
 max_tokens:
-    architect: 8192
-    surgeon: 12288
+    architect: 16384
+    surgeon: 16384
     healer: 8192
-    validator: 4096
+    validator: 8192
+
+# ── Context Windows (Ollama only) ─────────────────────────────────
+# num_ctx per model, matched by substring against the model name
+# (longest match wins). Tuned for an RX 6950 XT (16GB VRAM) + 32GB RAM:
+#   32b — Q4 weights (~19GB) already spill into system RAM; KV cache costs
+#         ~262KB/token, so 24576 tokens (~6.3GB) keeps the total ~26GB and
+#         inside 32GB system RAM. Raise to 32768 only if you close
+#         everything else while the pipeline runs.
+#   14b — ~9GB weights + ~196KB/token KV: full 32k window ≈ 15.4GB, fits
+#         (mostly) on-GPU.
+#   7b  — ~5GB weights + ~57KB/token KV: full 32k window fits easily.
+# context_window below is the fallback for models matching no pattern.
+context_window: 32768
+context_windows:
+    "32b": 24576
+    "14b": 32768
+    "7b": 32768
 
 # ── Healer Loop ───────────────────────────────────────────────────
 # Maximum number of repair passes the healer makes before halting.
@@ -82,7 +102,7 @@ healer_escalate_after: 1
 # context per repair attempt. Files referenced in the traceback are loaded
 # whole, most-mentioned first; loading stops once the next file would
 # exceed the budget. Omitted files are named in the healer's prompt.
-healer_context_budget: 6000
+healer_context_budget: 11000
 
 # ── Adaptive Test Runner ──────────────────────────────────────────
 # How often Phase 3 (full suite run) executes after Phases 1–2 pass:
@@ -141,3 +161,6 @@ telemetry_file: "healing_telemetry.jsonl"
 
 # Print full LLM prompts to console (very verbose, useful for debugging)
 debug_prompts: false
+
+# Give all the time needed for the llm to respond
+request_timeout: 0

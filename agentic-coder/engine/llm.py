@@ -27,8 +27,20 @@ DEFAULTS = {
     "surgeon_min_output_chars": 100,
     "surgeon_patch_retry": True,
     "suite_run_every_n_tasks": 1,
-    "context_window": 16384,
-    "request_timeout": 900,
+    "context_window": 32768,
+    # Per-model num_ctx overrides (Ollama only), matched by substring against
+    # the model name; longest match wins. Sized for 16GB VRAM + 32GB RAM:
+    # 32B Q4 weights (~19GB) already spill into system RAM, and their KV
+    # cache costs ~262KB/token — 24576 tokens keeps the total under ~26GB.
+    # 7B/14B models fit on-GPU with their full 32k native window.
+    "context_windows": {
+        "32b": 24576,
+        "14b": 32768,
+        "7b": 32768,
+    },
+    # 0 = no HTTP timeout: requests block until the model finishes, however
+    # long that takes. Walk-away mode for full unattended builds.
+    "request_timeout": 0,
     "git_autocommit": False,
     "snapshot_files": True,
     "auto_approve_privileged": False,
@@ -117,6 +129,33 @@ def get_healer_escalation_model(config: dict | None = None) -> str:
                                         DEFAULTS["models"]["surgeon"])
 
 
+def resolve_context_window(model: str, config: dict) -> int:
+    """
+    Resolves num_ctx for one model (Ollama only — num_ctx is an Ollama
+    option; other providers ignore it).
+
+    The 'context_windows' config dict maps model-name substrings to token
+    counts (e.g. "32b": 24576). The longest matching pattern wins, so a
+    specific model name can override a parameter-size pattern. Falls back
+    to the flat 'context_window' key when nothing matches.
+    """
+    overrides = config.get("context_windows")
+    if isinstance(overrides, dict):
+        model_lower = model.lower()
+        best_len, best_value = -1, None
+        for pattern, value in overrides.items():
+            pattern_str = str(pattern).lower()
+            if pattern_str and pattern_str in model_lower:
+                if len(pattern_str) > best_len:
+                    try:
+                        best_len, best_value = len(pattern_str), int(value)
+                    except (TypeError, ValueError):
+                        continue
+        if best_value is not None:
+            return best_value
+    return config.get("context_window", 32768)
+
+
 # ==========================================
 # PRIMARY LLM QUERY INTERFACE
 # ==========================================
@@ -160,7 +199,7 @@ def query_llm(
 
     options = {
         "temperature": temperature,
-        "num_ctx": config.get("context_window", 16384),
+        "num_ctx": resolve_context_window(model, config),
         "num_predict": num_predict,
     }
 
@@ -181,7 +220,7 @@ def query_llm(
             messages=messages,
             options=options,
             base_url=config.get("ollama_base_url", "http://localhost:11434"),
-            timeout=config.get("request_timeout", 900),
+            timeout=config.get("request_timeout", 0),
         )
     elif provider == "openai":
         return _call_openai(model, messages, options, config)
@@ -204,15 +243,21 @@ def _call_ollama(
     messages: list,
     options: dict,
     base_url: str,
-    timeout: int,
+    timeout: int | None,
 ) -> str:
     """
     Calls local Ollama /api/chat endpoint.
     keep_alive=0 forces immediate VRAM eviction so the next model
     can load without OOM errors on single-GPU setups.
     Strips DeepSeek-R1 <think>...</think> chain-of-thought tokens.
+
+    timeout <= 0 (or None) means no HTTP timeout — the request blocks until
+    the model finishes, however long generation takes. The runaway-generation
+    guard is num_predict, not the socket timeout.
     """
     url = f"{base_url.rstrip('/')}/api/chat"
+    if not timeout or timeout <= 0:
+        timeout = None
 
     payload = {
         "model": model,
