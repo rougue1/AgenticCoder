@@ -5,6 +5,7 @@ from pathlib import Path
 from engine.llm import query_llm, query_llm_with_json_retry, load_config
 from spec.prompts import compile_agent_prompts, prompts_need_compilation
 from spec.sdd import read_design_doc
+from spec.stack import parse_stack_profile, stack_profile_missing
 
 
 def load_steering_context(agent_dir: Path, tier: str) -> str:
@@ -116,15 +117,18 @@ def get_fixture_registry(app_dir: Path) -> list[str]:
 def steering_needs_generation(steering_dir: Path, root_dir: Path) -> bool:
     """
     Returns True if steering artifacts need to be (re)generated. Triggers when
-    the steering files themselves are stale (see steering_files_stale) OR when
-    the compiled prompts under .agent/prompts/ are missing or incomplete.
+    the steering files themselves are stale (see steering_files_stale), OR
+    when .agent/stack.md is missing, OR when the compiled prompts under
+    .agent/prompts/ are missing or incomplete.
 
-    The orchestrator distinguishes the two cases: stale steering files trigger
-    full regeneration (which recompiles prompts at the end), while intact
-    steering files with missing compiled prompts trigger prompt recompilation
-    only.
+    The orchestrator distinguishes the cases: stale steering files trigger
+    full regeneration (which regenerates stack.md and recompiles prompts at
+    the end), while intact steering files with only stack.md or compiled
+    prompts missing trigger regeneration of just that artifact.
     """
     if steering_files_stale(steering_dir, root_dir):
+        return True
+    if stack_profile_missing(steering_dir.parent):
         return True
     return prompts_need_compilation(steering_dir.parent)
 
@@ -326,11 +330,201 @@ def generate_steering_files(
 
     print("[STEERING] Files written: AGENTS.md, tech.md, structure.md")
 
+    # Generate the stack profile from design.md + the freshly written steering
+    # files. Non-fatal — a missing stack.md only disables the stack-aware
+    # toolchain paths, and steering_needs_generation() retriggers it next boot.
+    generate_stack_profile(agent_dir, root_dir)
+
     # Compile stack-specific tier prompts from the freshly written steering
     # files. Only runs on the fully successful path — on default/failed paths
     # the tiers silently fall back to their generic base prompts, which is the
     # correct behavior when the stack is unknown.
     compile_agent_prompts(agent_dir, root_dir)
+
+
+# System prompt for stack profile generation. This is one of the two places
+# in the pipeline where a default stack may be named (the other is prompt
+# compilation) — it is an instruction to the LLM, never a branch in code.
+# The toolchain routing code reads whatever stack.md says and executes it.
+_STACK_PROFILE_SYSTEM_PROMPT = (
+    "You are a Lead Architect generating a stack profile document for an "
+    "autonomous AI coding pipeline. The profile is the pipeline's single "
+    "source of truth for how to interact with the target project's toolchain: "
+    "which package managers to use, how to run tests, and what one-time setup "
+    "a fresh environment needs. The pipeline itself knows nothing about any "
+    "language or toolchain — it executes exactly what this document declares.\n\n"
+    "Derive everything from the design document and steering files provided. "
+    "If they do not identify a stack, assume a Flask/Python backend with a "
+    "TypeScript frontend (pip as the primary package manager, npm for the "
+    "frontend).\n\n"
+    "Output ONLY a Markdown document with EXACTLY this structure. The section "
+    "headings and key names are machine-parsed — reproduce them verbatim. No "
+    "commentary before or after the document. No code fences around it.\n\n"
+    "# Stack Profile\n\n"
+    "## Runtime\n"
+    "- runtime: <language runtime name and version, e.g. a language + version>\n"
+    "- runtime_check_command: `<command that exits 0 if the runtime is installed>`\n\n"
+    "## Commands\n"
+    "- build_command: `<command to build the project — omit this line if there "
+    "is no build step>`\n"
+    "- test_suite_command: `<command to run the full test suite>`\n"
+    "- targeted_test_command: `<command to run one named test — MUST contain "
+    "the literal placeholders {file} and {test}>`\n"
+    "- file_test_command: `<command to run one test file — MUST contain {file}>`\n"
+    "- test_function_pattern: `<regex with ONE capture group matching a test "
+    "declaration's name in this stack's test source code>`\n\n"
+    "## Package Managers\n\n"
+    "### <manager name> (primary)\n"
+    "- install_command: `<install command template — MUST contain {package}>`\n"
+    "- uninstall_command: `<uninstall command template — MUST contain {package}>`\n"
+    "- requires_sudo: <true|false — does installing need elevated privileges?>\n"
+    "- interactive: <true|false — do its commands prompt for user input?>\n"
+    "- working_directory: <directory relative to project root the commands "
+    "must run from — omit this line if the project root is correct>\n"
+    "- source_file_extensions: `<.ext>`, `<.ext>`  <file extensions in which "
+    "this manager's dependencies are declared>\n"
+    "- dependency_scan_patterns:\n"
+    "  - `<regex with ONE capture group capturing an external dependency name "
+    "as it is declared in source files of those extensions>`\n\n"
+    "Add one '### <name>' block per package manager the project needs — e.g. "
+    "a backend manager and a frontend manager are both valid simultaneously. "
+    "Mark exactly ONE block with '(primary)'.\n\n"
+    "## Bootstrap Commands\n\n"
+    "- command: `<shell command to run once on a fresh environment>`\n"
+    "  check: `<command that exits 0 if this step is already satisfied — omit "
+    "this line if there is no cheap check>`\n"
+    "  requires_sudo: <true|false>\n"
+    "  interactive: <true|false>\n"
+    "  reason: <one line explaining why this step is needed>\n\n"
+    "Bootstrap rules: an ordered list of one-time setup steps a fresh "
+    "environment needs before the first task cycle — the test framework and "
+    "its plugins, global CLI tools, runtime/build-target registration, "
+    "anything the test_suite_command requires to even start. These are "
+    "arbitrary shell commands, not package names. Prefer non-interactive "
+    "flags (assume-yes options) wherever the toolchain supports them. Do NOT "
+    "include application dependencies — those are detected and installed per "
+    "task by the dependency scanner. If no bootstrap steps are needed, output "
+    "the section heading with no entries.\n\n"
+    "Accuracy rules:\n"
+    "1. Every command must be real, correct syntax for the chosen toolchain.\n"
+    "2. Be honest with requires_sudo and interactive — the pipeline pauses "
+    "for user confirmation on any command marked true. A false negative "
+    "hangs or fails an automated run; a false positive causes needless "
+    "prompts.\n"
+    "3. The placeholders {package}, {file}, and {test} must appear literally "
+    "in their templates — the pipeline substitutes them at execution time.\n"
+    "4. test_suite_command must mirror the test command declared during "
+    "steering (run.json), if one was declared.\n")
+
+
+def generate_stack_profile(agent_dir: Path, root_dir: Path) -> None:
+    """
+    Generates .agent/stack.md — the stack profile document that drives the
+    toolchain layer (package manager routing, adaptive test commands, and
+    environment bootstrap). Called at the end of generate_steering_files(),
+    and standalone by the orchestrator when stack.md is the only missing
+    steering artifact.
+
+    One LLM call on the same tier as the other steering generation calls,
+    with design.md and the three SDD steering files as context. The response
+    is validated by parsing it with spec/stack.parse_stack_profile() before
+    being written; an unparseable response gets one corrective retry.
+
+    Non-fatal: on failure the file is simply not written and every consumer
+    falls back to its legacy behavior.
+    """
+    config = load_config(root_dir)
+
+    design_content = read_design_doc(root_dir)
+    if not design_content:
+        print("[STACK] design.md not available — "
+              "skipping stack profile generation.")
+        return
+
+    steering_dir = agent_dir / "steering"
+    steering_parts = []
+    for filename in ("AGENTS.md", "tech.md", "structure.md"):
+        fpath = steering_dir / filename
+        if not fpath.exists():
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if content:
+            steering_parts.append(f"--- {filename} ---\n{content}")
+
+    print("[STACK] Generating stack profile (.agent/stack.md) "
+          "from design.md...")
+
+    base_user_prompt = (
+        f"DESIGN DOCUMENT:\n{design_content}\n\n"
+        f"STEERING FILES:\n" +
+        ("\n\n".join(steering_parts) if steering_parts else "(none)") +
+        "\n\nGenerate the stack profile document now.")
+
+    response = query_llm("architect", _STACK_PROFILE_SYSTEM_PROMPT,
+                         base_user_prompt, config)
+    content = _strip_markdown_fences(response)
+    profile = parse_stack_profile(content)
+
+    if not _stack_profile_usable(profile):
+        print("[STACK] Generated profile failed validation — "
+              "retrying once with a corrective prompt...")
+        corrective_user = (
+            "Your previous stack profile could not be parsed. It must follow "
+            "the exact section headings ('## Runtime', '## Commands', "
+            "'## Package Managers', '## Bootstrap Commands') and "
+            "'key: value' bullet format from the instructions, with no code "
+            "fences and no commentary.\n\n"
+            f"Your previous output (first 500 chars):\n{response[:500]}\n\n" +
+            base_user_prompt)
+        response = query_llm("architect", _STACK_PROFILE_SYSTEM_PROMPT,
+                             corrective_user, config)
+        content = _strip_markdown_fences(response)
+        profile = parse_stack_profile(content)
+
+    if not _stack_profile_usable(profile):
+        print("[WARN] Stack profile generation failed after retry. "
+              "The toolchain layer will use legacy fallbacks until "
+              "stack.md is generated on a future boot.")
+        return
+
+    (agent_dir / "stack.md").write_text(content.rstrip() + "\n",
+                                        encoding="utf-8")
+
+    managers = [m["name"] for m in profile.get("package_managers", [])]
+    bootstrap_count = len(profile.get("bootstrap_commands", []))
+    print(f"[STACK] Stack profile written: .agent/stack.md "
+          f"(package managers: {', '.join(managers) or 'none'}; "
+          f"bootstrap steps: {bootstrap_count})")
+
+
+def _stack_profile_usable(profile: dict | None) -> bool:
+    """
+    Minimum bar for accepting a generated profile: it parsed, and it declares
+    at least a full-suite test command or one package manager. Anything less
+    gives the toolchain layer nothing to act on.
+    """
+    if not profile:
+        return False
+    return bool(
+        profile.get("test_suite_command") or profile.get("package_managers"))
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """
+    Removes a single pair of markdown code fences wrapping the whole
+    response, if present — models sometimes fence the entire document
+    despite instructions. Inner content is left untouched.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        first_newline = cleaned.find("\n")
+        cleaned = cleaned[first_newline + 1:] if first_newline != -1 else ""
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3].rstrip()
+    return cleaned.strip()
 
 
 def _prepend_universal_rules(agent_content: str) -> str:

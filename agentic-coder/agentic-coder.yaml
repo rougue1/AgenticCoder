@@ -122,6 +122,15 @@ auto_install_deps: true
 # false = no version pins (always latest)
 pin_dependency_versions: true
 
+# ── Permission Gating ─────────────────────────────────────────────
+# Commands that .agent/stack.md marks as requires_sudo pause the pipeline
+# and ask for confirmation before running. Set true to pre-approve all
+# privileged commands without prompting (passwordless-sudo or fully
+# automated environments). Commands marked interactive always pause —
+# they need a human at the terminal — and declining a prompt never halts
+# the pipeline; the command is logged and skipped.
+auto_approve_privileged: false
+
 # ── Logging ──────────────────────────────────────────────────────
 # Telemetry log file path (relative to project root).
 # Each task cycle appends one JSONL record.

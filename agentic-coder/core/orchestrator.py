@@ -11,15 +11,22 @@ from spec.sdd import sdd_documents_exist, generate_sdd_documents
 from spec.tasks import get_next_task, commit_task_complete, count_tasks
 from spec.steering import (
     generate_steering_files,
+    generate_stack_profile,
     steering_needs_generation,
     steering_files_stale,
 )
-from spec.prompts import compile_agent_prompts
-from spec.stack import load_stack_profile
+from spec.prompts import compile_agent_prompts, prompts_need_compilation
+from spec.stack import load_stack_profile, stack_profile_missing
 from testing.preflight import validate_source_completeness, validate_test_correctness
 from testing.fixtures import ensure_init_files, check_fixture_drift, get_fixture_summary
 from testing.runner import load_run_config, extract_new_test_functions
-from tools.conda import ensure_conda_env, install_bootstrap_packages
+from tools.conda import (
+    ensure_conda_env,
+    install_bootstrap_packages,
+    run_bootstrap_commands,
+    bootstrap_pending,
+    mark_bootstrap_complete,
+)
 from tools.deps import update_dependencies
 from core.agents import get_architect_plan, execute_surgeon, execute_healer_loop
 from core.telemetry import log_telemetry, print_summary, start_timer, format_duration
@@ -133,19 +140,38 @@ def boot() -> None:
     steering_dir = agent_dir / "steering"
     if steering_needs_generation(steering_dir, root_dir):
         if steering_files_stale(steering_dir, root_dir):
-            # Full regeneration — recompiles prompts at the end internally.
+            # Full regeneration — regenerates stack.md and recompiles
+            # prompts at the end internally.
             generate_steering_files(agent_dir, root_dir)
         else:
-            # Steering files intact; only compiled prompts missing/incomplete.
-            print("[PROMPTS] Steering intact — recompiling agent prompts only.")
-            compile_agent_prompts(agent_dir, root_dir)
+            # Steering files intact — regenerate only the missing artifacts.
+            if stack_profile_missing(agent_dir):
+                print("[STACK] Steering intact — generating stack.md only.")
+                generate_stack_profile(agent_dir, root_dir)
+            if prompts_need_compilation(agent_dir):
+                print(
+                    "[PROMPTS] Steering intact — recompiling agent prompts only."
+                )
+                compile_agent_prompts(agent_dir, root_dir)
 
     # ── Conda environment ──
     python_version = config.get("python_version", "3.11")
     env_created = ensure_conda_env(conda_env, python_version)
 
-    # ── Bootstrap packages from run.json (installed once on fresh env creation) ──
-    if env_created:
+    # ── Environment bootstrap (once per fresh env / stack.md change) ──
+    # Primary path: ordered bootstrap commands from stack.md, permission-gated
+    # where flagged. Legacy fallback: run.json bootstrap_packages via pip,
+    # only when stack.md declares no bootstrap commands.
+    _stack_profile = load_stack_profile(agent_dir)
+    _bootstrap_cmds = (_stack_profile or {}).get("bootstrap_commands", [])
+    if _bootstrap_cmds:
+        if env_created or bootstrap_pending(agent_dir):
+            run_bootstrap_commands(_bootstrap_cmds, conda_env, root_dir,
+                                   config)
+            mark_bootstrap_complete(agent_dir)
+        else:
+            print("[BOOTSTRAP] Environment already bootstrapped — skipping.")
+    elif env_created:
         _boot_run_cfg = load_run_config(root_dir)
         if _boot_run_cfg:
             bootstrap = _boot_run_cfg.get("bootstrap_packages", [])

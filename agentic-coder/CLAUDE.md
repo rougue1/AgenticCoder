@@ -24,14 +24,18 @@ agentic-coder/
 │   ├── checkpoint.py        — save_checkpoint() and load_checkpoint(). Reads/writes .agent/checkpoint.json.
 │   └── telemetry.py         — Logs healer attempts to healing_telemetry.jsonl.
 ├── spec/
-│   ├── steering.py          — generate_steering_files(): produces SDD files, run.json, stack.md (planned).
+│   ├── steering.py          — generate_steering_files(): produces SDD files, run.json, stack.md.
+│   │                          generate_stack_profile(): one LLM call producing .agent/stack.md from
+│   │                          design.md + steering files; validated by parsing before write.
 │   │                          build_system_prompt(): prepends steering context to every tier prompt.
-│   │                          steering_needs_generation(): detects missing/stale steering artifacts.
+│   │                          steering_needs_generation(): detects missing/stale steering artifacts
+│   │                          (missing stack.md triggers stack-profile-only regeneration).
 │   ├── prompts.py           — compile_agent_prompts(): compiles stack-specific tier prompts.
 │   │                          load_compiled_prompt(): loads compiled prompt for a tier from .agent/prompts/.
-│   ├── stack.py             — load_stack_profile(): reads .agent/stack.md into a flat key/value dict
-│   │                          (command templates for the adaptive runner). Generation of stack.md
-│   │                          itself is still planned in spec/steering.py.
+│   ├── stack.py             — load_stack_profile(): parses .agent/stack.md — flat scalar keys
+│   │                          (command templates for the adaptive runner) plus structured
+│   │                          package_managers and bootstrap_commands sections. Generation lives
+│   │                          in spec/steering.py generate_stack_profile().
 │   ├── tasks.py             — Task list parser. commit_task_complete(): marks tasks [x] in tasks.md.
 │   └── sdd.py               — SDD file schema and helpers (if present).
 ├── engine/
@@ -47,17 +51,25 @@ agentic-coder/
 │   │                          templates come from stack.md; full-suite-only when stack.md absent.
 │   └── preflight.py         — Validator preflight checks: source audit (pass 1) and test audit (pass 2).
 └── tools/
-    ├── deps.py              — update_dependencies(): scans new source files for imports, installs via pip.
-    │                          Planned: package manager routing via stack.md.
-    ├── conda.py             — Environment bootstrap. Creates conda env, installs bootstrap_packages.
-    │                          Planned: stack.md-driven bootstrap command execution.
+    ├── deps.py              — update_dependencies(): scans new source files for dependency
+    │                          declarations and routes installs through the package manager
+    │                          command templates in stack.md. Legacy pip/npm fallback when
+    │                          stack.md declares no package managers.
+    ├── conda.py             — Environment bootstrap. Creates conda env. run_bootstrap_commands():
+    │                          executes the stack.md bootstrap sequence (check-command idempotency,
+    │                          permission gating, run-once marker). Legacy: install_bootstrap_packages()
+    │                          for run.json bootstrap_packages when stack.md has no bootstrap commands.
+    ├── permissions.py       — confirm_command(): shared permission gate for commands stack.md marks
+    │                          requires_sudo or interactive. Declines are logged and skipped — never
+    │                          halt. auto_approve_privileged config key pre-approves sudo commands.
     └── git.py               — STUB ONLY. Never wire this in. git_autocommit is always false.
 
 Runtime artifacts (written to the target project's .agent/ directory):
     .agent/steering/         — SDD files generated from design.md
     .agent/run.json          — Stack-specific test command and config (machine-readable)
-    .agent/stack.md          — Stack profile: toolchain commands, package manager, bootstrap (planned)
-    .agent/prompts/          — Compiled stack-specific tier prompts: architect.txt, surgeon.txt, etc. (planned)
+    .agent/stack.md          — Stack profile: toolchain commands, package managers, bootstrap
+    .agent/.bootstrap_hash   — stack.md content hash stamped after the bootstrap sequence runs
+    .agent/prompts/          — Compiled stack-specific tier prompts: architect.txt, surgeon.txt, etc.
     .agent/checkpoint.json   — Last completed task + last_exit_code
     healing_telemetry.jsonl  — Per-attempt healer log
 
@@ -213,30 +225,46 @@ The test_file_glob field is matched against filenames extracted from Surgeon out
 
 ---
 
-## The stack.md Contract (reader implemented in spec/stack.py; generation still planned in spec/steering.py)
+## The stack.md Contract (generation in spec/steering.py; reader in spec/stack.py)
 
 stack.md is generated once during steering and lives at .agent/stack.md. It is the single source
 of truth for how to interact with the project's toolchain. It is a Markdown document — human and
 LLM readable — not a JSON/YAML config file.
 
-The schema must express at minimum:
-    primary_package_manager:        name + install/uninstall command templates using {package}
-    requires_sudo:                  whether install commands need elevated privileges
-    interactive:                    whether any commands require user input
-    build_command:                  command to build the project
-    test_suite_command:             full suite run command (mirrors run.json test_command)
-    targeted_test_command:          template using {file} and {test} for single-test execution
-    file_test_command:              template using {file} for file-level test execution
-    runtime:                        language runtime name + version check command
-    bootstrap_commands:             ordered list of one-time setup commands for fresh environments
-    dependency_scan_patterns:       patterns identifying external dependency declarations per file type
+Document structure (machine-parsed by spec/stack.parse_stack_profile):
+    Scalar "key: value" bullet lines anywhere outside the structured sections:
+        runtime:                language runtime name + version
+        runtime_check_command:  command that exits 0 if the runtime is installed
+        build_command:          command to build the project (optional)
+        test_suite_command:     full suite run command (mirrors run.json test_command)
+        targeted_test_command:  template using {file} and {test} for single-test execution
+        file_test_command:      template using {file} for file-level test execution
+        test_function_pattern:  regex (one capture group) matching test declarations
+    "## Package Managers" section — one "### <name>" block per manager, exactly one
+    marked "(primary)". Multiple managers are valid (e.g. backend + frontend). Per block:
+        install_command / uninstall_command:  templates using {package}
+        requires_sudo / interactive:          gating flags for the permission gate
+        working_directory:                    optional cwd relative to project root
+        source_file_extensions:               extensions dependencies are declared in
+        dependency_scan_patterns:             regexes (one capture group) identifying
+                                              external dependency declarations
+    "## Bootstrap Commands" section — ordered one-time setup entries:
+        command:  arbitrary shell command
+        check:    optional idempotency probe — exit 0 skips the command
+        requires_sudo / interactive / reason
 
-stack.md is generated by calling the LLM with design.md + SDD files as context. Default when no
-stack is specified: Flask/Python + TypeScript. This default lives only in the generation prompt.
-steering_needs_generation() treats missing stack.md as a trigger for regeneration.
+stack.md is generated by one LLM call (architect tier, same as other steering generation) with
+design.md + the three steering files as context, validated by parsing before write, with one
+corrective retry. Default when no stack is specified: Flask/Python + TypeScript. This default
+lives only in the generation prompt — never in routing code. steering_needs_generation() treats
+missing stack.md as a regeneration trigger; if stack.md is the only missing artifact, only
+stack.md is regenerated (orchestrator boot()).
 
-Permission gating: any command stack.md marks as requires_sudo or interactive must pause and
-prompt the user for confirmation before executing. Configurable to auto-approve for headless envs.
+Permission gating (tools/permissions.py confirm_command): any command stack.md marks as
+requires_sudo or interactive pauses and prompts the user before executing. A decline is logged
+and the command skipped — never a halt. The auto_approve_privileged config key (default false)
+pre-approves requires_sudo commands for headless environments; interactive commands always
+pause and run attached to the terminal when approved.
 
 ---
 

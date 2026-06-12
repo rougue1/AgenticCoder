@@ -30,6 +30,7 @@ DEFAULTS = {
     "request_timeout": 900,
     "git_autocommit": False,
     "snapshot_files": True,
+    "auto_approve_privileged": False,
 }
 
 

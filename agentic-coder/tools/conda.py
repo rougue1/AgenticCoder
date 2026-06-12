@@ -1,7 +1,10 @@
+import hashlib
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+from tools.permissions import confirm_command
 
 
 def ensure_conda_env(env_name: str, python_version: str = "3.11") -> bool:
@@ -53,14 +56,148 @@ def ensure_conda_env(env_name: str, python_version: str = "3.11") -> bool:
     return True
 
 
+def run_shell_command(
+    command: str,
+    conda_env: str,
+    cwd: Path | None = None,
+    capture: bool = True,
+    timeout: int | None = None,
+) -> tuple[int, str]:
+    """
+    Executes a free-form shell command string inside the conda environment.
+
+    stack.md commands (install templates, bootstrap steps, check commands)
+    are arbitrary shell strings — they may chain with &&, set environment
+    variables, or pipe — so they run through a shell rather than shlex argv
+    splitting. The shell is execution infrastructure, not stack knowledge:
+    every command string itself comes from stack.md, never from code.
+    """
+    return run_in_env(
+        ["bash", "-c", command],
+        conda_env,
+        cwd=cwd,
+        capture=capture,
+        timeout=timeout,
+    )
+
+
+# ==========================================
+# STACK.MD BOOTSTRAP (one-time environment setup)
+# ==========================================
+
+_BOOTSTRAP_MARKER = ".bootstrap_hash"
+
+
+def run_bootstrap_commands(
+    commands: list[dict],
+    conda_env: str,
+    root_dir: Path,
+    config: dict,
+) -> None:
+    """
+    Executes the ordered bootstrap command list from stack.md. Each entry is
+    a dict from spec/stack.parse_stack_profile():
+
+        command:       arbitrary shell command string (required)
+        check:         optional command — exit 0 means the step's effect is
+                       already present and the command is skipped (idempotency)
+        requires_sudo: route through the permission gate before running
+        interactive:   gate + run attached to the terminal so the user can
+                       answer the command's own prompts
+        reason:        one-line explanation shown at the permission gate
+
+    Non-fatal end to end: declined gates and failed commands are logged and
+    skipped — the pipeline continues either way. The per-task dependency
+    scanner and the Healer can often recover from a missing bootstrap step.
+    """
+    print(f"[BOOTSTRAP] Running {len(commands)} stack.md bootstrap step(s)...")
+
+    for index, entry in enumerate(commands, 1):
+        command = entry.get("command", "")
+        if not command:
+            continue
+        label = f"[BOOTSTRAP {index}/{len(commands)}]"
+
+        check = entry.get("check")
+        if check:
+            check_code, _ = run_shell_command(check,
+                                              conda_env,
+                                              cwd=root_dir,
+                                              timeout=120)
+            if check_code == 0:
+                print(f"{label} Already satisfied (check passed) — "
+                      f"skipping: {command}")
+                continue
+
+        requires_sudo = entry.get("requires_sudo", False)
+        interactive = entry.get("interactive", False)
+        reason = entry.get(
+            "reason", "One-time environment bootstrap step from stack.md")
+
+        if not confirm_command(command, reason, requires_sudo, interactive,
+                               config):
+            continue  # decline already logged by the gate — never halt
+
+        print(f"{label} Running: {command}")
+        # Gated commands run attached to the terminal so the user can answer
+        # password/installer prompts; everything else is captured for logging.
+        passthrough = requires_sudo or interactive
+        code, output = run_shell_command(
+            command,
+            conda_env,
+            cwd=root_dir,
+            capture=not passthrough,
+            timeout=None if passthrough else 1800,
+        )
+        if code != 0:
+            tail = f"\n{output[-500:]}" if output else ""
+            print(f"[WARN] Bootstrap step failed (exit {code}) — "
+                  f"continuing: {command}{tail}")
+
+
+def bootstrap_pending(agent_dir: Path) -> bool:
+    """
+    True when the stack.md bootstrap sequence still needs to run: no marker
+    from a previous run, or stack.md changed since the marker was written
+    (steering regeneration). The fresh-environment case is handled by the
+    caller via ensure_conda_env()'s return value, which forces a run
+    regardless of the marker.
+    """
+    stack_path = agent_dir / "stack.md"
+    if not stack_path.exists():
+        return False
+    marker = agent_dir / _BOOTSTRAP_MARKER
+    if not marker.exists():
+        return True
+    try:
+        return marker.read_text(
+            encoding="utf-8").strip() != _stack_hash(stack_path)
+    except OSError:
+        return True
+
+
+def mark_bootstrap_complete(agent_dir: Path) -> None:
+    """Stamps the bootstrap marker with the current stack.md content hash."""
+    stack_path = agent_dir / "stack.md"
+    if not stack_path.exists():
+        return
+    (agent_dir / _BOOTSTRAP_MARKER).write_text(_stack_hash(stack_path),
+                                               encoding="utf-8")
+
+
+def _stack_hash(stack_path: Path) -> str:
+    return hashlib.sha256(stack_path.read_bytes()).hexdigest()
+
+
 def install_bootstrap_packages(
     packages: list[str],
     conda_env: str,
 ) -> None:
     """
-    Installs the bootstrap package list from .agent/run.json into the conda
-    environment using pip. Called once immediately after a fresh environment
-    is created, before the first task cycle.
+    LEGACY bootstrap path: installs the bootstrap_packages list from
+    .agent/run.json into the conda environment using pip. Only used when
+    stack.md declares no bootstrap commands — stack.md's Bootstrap Commands
+    section supersedes this list entirely (see run_bootstrap_commands).
 
     Non-fatal: logs a warning on failure rather than halting. The per-task
     dependency scanner will attempt to recover any missing packages anyway.
@@ -105,6 +242,7 @@ def run_in_env(
     cwd: Path | None = None,
     extra_env: dict | None = None,
     timeout: int | None = None,
+    capture: bool = True,
 ) -> tuple[int, str]:
     """
     Executes a command inside the specified Conda environment using 'conda run'.
@@ -116,6 +254,9 @@ def run_in_env(
         cwd:        Working directory for the subprocess. Defaults to current dir.
         extra_env:  Additional environment variables to inject (merged with os.environ)
         timeout:    Optional subprocess timeout in seconds
+        capture:    When False the subprocess inherits this terminal's stdio —
+                    required for commands that prompt the user (sudo passwords,
+                    interactive installers). Output string is "" in that mode.
 
     This is the single chokepoint for all conda subprocess calls in the pipeline.
     All test runners, compilers, and package managers go through here.
@@ -127,6 +268,15 @@ def run_in_env(
     full_cmd = ["conda", "run", "--no-capture-output", "-n", conda_env] + cmd
 
     try:
+        if not capture:
+            result = subprocess.run(
+                full_cmd,
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+            )
+            return result.returncode, ""
+
         result = subprocess.run(
             full_cmd,
             cwd=cwd,
