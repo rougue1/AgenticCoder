@@ -83,6 +83,10 @@ def _print_status(root_dir: Path) -> None:
         print(
             f"  Progress:       {checkpoint.get('task_index', '?')}/{checkpoint.get('total_tasks', '?')}"
         )
+        last_exit = checkpoint.get("last_exit_code", 0)
+        print(
+            f"  Last exit code: {last_exit} "
+            f"({'green' if last_exit == 0 else 'tests failing'})")
         print(f"  Last updated:   {checkpoint.get('last_updated', '?')}")
     else:
         print(f"  Checkpoint:     None")

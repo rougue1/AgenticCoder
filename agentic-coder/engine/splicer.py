@@ -42,7 +42,7 @@ def extract_file_chunks(ai_response: str) -> list[tuple[str, str]]:
     return results
 
 
-def splice_multi_file_response(ai_response: str, root_dir: Path) -> bool:
+def splice_multi_file_response(ai_response: str, root_dir: Path) -> list[str]:
     """
     Parses and applies all file patches from a unified LLM response.
     Each file section must be prefixed with '### FILE: relative/path/to/file'.
@@ -53,9 +53,10 @@ def splice_multi_file_response(ai_response: str, root_dir: Path) -> bool:
         3. Sanitize block (strip fences, normalize whitespace)
         4. Delegate to apply_search_replace_block()
 
-    Returns True only if every patch succeeded.
-    Returns False on partial failure but continues processing remaining files
-    rather than aborting early — maximizes the number of patches applied.
+    Returns the list of relative paths whose patches were fully applied.
+    An empty list means nothing was written to disk. Failed patches are
+    logged and skipped — processing continues with the remaining files to
+    maximize the number of patches applied.
 
     Logs a warning (not error) if no valid blocks are found — the caller
     (orchestrator) decides whether that's fatal for the current task.
@@ -73,18 +74,17 @@ def splice_multi_file_response(ai_response: str, root_dir: Path) -> bool:
             print(
                 "[WARN] SEARCH/REPLACE found but no ### FILE: markers. Cannot determine target file."
             )
-        return False
+        return []
 
-    overall_success = True
+    patched: list[str] = []
     for relative_path, block_content in chunks:
         target_path = root_dir / relative_path
         print(f"[SPLICE] → {relative_path}")
-        if not apply_search_replace_block(target_path, block_content,
-                                          root_dir):
-            overall_success = False
-            # Continue to next file rather than aborting
+        if apply_search_replace_block(target_path, block_content, root_dir):
+            patched.append(relative_path)
+        # On failure: continue to next file rather than aborting
 
-    return overall_success
+    return patched
 
 
 def count_file_patches(ai_response: str) -> int:

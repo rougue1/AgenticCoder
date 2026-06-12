@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 from engine.llm import query_llm, query_llm_with_json_retry, load_config
+from spec.prompts import compile_agent_prompts, prompts_need_compilation
 from spec.sdd import read_design_doc
 
 
@@ -114,7 +115,24 @@ def get_fixture_registry(app_dir: Path) -> list[str]:
 
 def steering_needs_generation(steering_dir: Path, root_dir: Path) -> bool:
     """
-    Returns True if steering files need to be (re)generated. Triggers when ANY of:
+    Returns True if steering artifacts need to be (re)generated. Triggers when
+    the steering files themselves are stale (see steering_files_stale) OR when
+    the compiled prompts under .agent/prompts/ are missing or incomplete.
+
+    The orchestrator distinguishes the two cases: stale steering files trigger
+    full regeneration (which recompiles prompts at the end), while intact
+    steering files with missing compiled prompts trigger prompt recompilation
+    only.
+    """
+    if steering_files_stale(steering_dir, root_dir):
+        return True
+    return prompts_need_compilation(steering_dir.parent)
+
+
+def steering_files_stale(steering_dir: Path, root_dir: Path) -> bool:
+    """
+    Returns True if the steering files themselves need regeneration. Triggers
+    when ANY of:
         - steering_dir does not exist
         - AGENTS.md, tech.md, or structure.md is missing
         - .design_hash marker is missing
@@ -307,6 +325,12 @@ def generate_steering_files(
                          encoding="utf-8")
 
     print("[STEERING] Files written: AGENTS.md, tech.md, structure.md")
+
+    # Compile stack-specific tier prompts from the freshly written steering
+    # files. Only runs on the fully successful path — on default/failed paths
+    # the tiers silently fall back to their generic base prompts, which is the
+    # correct behavior when the stack is unknown.
+    compile_agent_prompts(agent_dir, root_dir)
 
 
 def _prepend_universal_rules(agent_content: str) -> str:

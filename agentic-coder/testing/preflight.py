@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from engine.llm import query_llm, clean_and_parse_json, load_config
 from engine.splicer import splice_multi_file_response
+from spec.prompts import resolve_base_prompt
 from spec.steering import build_system_prompt
 
 
@@ -36,45 +37,9 @@ def validate_source_completeness(
         print("[PREFLIGHT] No source files found to audit — proceeding.")
         return True
 
-    base_prompt = (
-        "You are a Code Completeness Auditor in an autonomous coding pipeline. "
-        "Review the provided implementation files BEFORE any tests are written against them.\n\n"
-        "Check for these specific issues:\n"
-        "1. STUB IMPLEMENTATIONS: functions/methods/procedures that contain only a no-op body "
-        "   (e.g., a single pass, empty return, or NotImplemented placeholder) when the task "
-        "   context implies real logic should be there\n"
-        "2. MISSING IMPORTS: names used in the file body that are not resolved via any import "
-        "   or module declaration at the top of the file\n"
-        "3. SYNTAX PROBLEMS: unterminated strings, mismatched brackets or braces, "
-        "   broken indentation or block structure\n"
-        "4. MISSING MODULE INIT FILES: package or module directories that require an "
-        "   initialization file for this project's language (as described in structure.md "
-        "   in the steering context) but do not have one\n"
-        "5. ABSOLUTE PATHS: hardcoded filesystem paths that will break outside the "
-        "   developer's machine\n"
-        "6. CIRCULAR DEPENDENCY RISK: module A imports module B which imports module A\n\n"
-        "Consult the injected steering context (structure.md) for the correct module "
-        "initialization file convention for this project's stack before flagging issue #4.\n\n"
-        "Return a SINGLE valid JSON object. No markdown fences. No extra text.\n"
-        "Format:\n"
-        "{\n"
-        '  "ready": true,\n'
-        '  "issues": [],\n'
-        '  "fixes": {}\n'
-        "}\n\n"
-        "OR if issues found:\n"
-        "{\n"
-        '  "ready": false,\n'
-        '  "issues": ["models.py: check_password() contains only a no-op body — needs real implementation"],\n'
-        '  "fixes": {\n'
-        '    "app/backend/models.py": "complete corrected file content as a single string"\n'
-        "  }\n"
-        "}\n\n"
-        "IMPORTANT:\n"
-        "- Only include a file in 'fixes' if you are confident the fix is correct and complete\n"
-        "- Do NOT fix things that look intentionally minimal (e.g., package init files with just re-exports)\n"
-        "- Set 'ready': true even if you applied fixes — false only means an unfixable blocker\n"
-    )
+    # Compiled stack-specific prompt if present, generic base prompt otherwise.
+    # The validator tier has two compilation units — this is the source audit.
+    base_prompt = resolve_base_prompt("validator_source", root_dir / ".agent")
     system_prompt = build_system_prompt(base_prompt, "validator",
                                         root_dir / ".agent", app_dir)
 
@@ -151,45 +116,9 @@ def validate_test_correctness(
         print("[PREFLIGHT] No test files to validate — skipping.")
         return True
 
-    base_prompt = (
-        "You are a Test Correctness Auditor in an autonomous coding pipeline. "
-        "Review the provided test files against their implementation and shared test "
-        "setup files. Your job is to catch bugs in the tests themselves BEFORE the "
-        "test runner collects them.\n\n"
-        "Check for these specific anti-patterns:\n\n"
-        "1. TEST SETUP MISMATCHES\n"
-        "   Test function signatures reference setup helpers (fixtures, hooks, before-each "
-        "   callbacks, or test context objects) that are not defined in any shared test "
-        "   setup file visible in the provided context. Consult the steering context "
-        "   (AGENTS.md, tech.md) for the correct test harness conventions for this stack.\n\n"
-        "2. IMPORT ERRORS\n"
-        "   Test files importing from modules that do not exist in the source files provided.\n\n"
-        "3. WRONG ASSERTION OR API PATTERNS\n"
-        "   Assertion style inconsistent with the test framework's idioms, use of deprecated "
-        "   query or assertion APIs, or assertions made on state that has not yet been "
-        "   persisted or flushed. Consult tech.md for the correct assertion and data-access "
-        "   patterns mandated for this project's stack.\n\n"
-        "4. FRAMEWORK CONTEXT ERRORS\n"
-        "   Operations that require application lifecycle setup (e.g., an app context, a "
-        "   transaction scope, or a server process) that is not in place at the point of "
-        "   assertion. Consult tech.md for the correct lifecycle pattern for this stack.\n\n"
-        "5. SCOPE CONFLICTS\n"
-        "   Test setup objects with a narrower lifecycle than the tests that consume them, "
-        "   causing teardown before assertions complete.\n\n"
-        "6. TEST ISOLATION VIOLATIONS\n"
-        "   Tests that modify shared mutable state or depend on execution order.\n\n"
-        "OUTPUT FORMAT:\n"
-        "If issues found — output SEARCH/REPLACE patches using this exact format:\n"
-        "### FILE: path/to/test_file.py\n"
-        "<<<<<<< SEARCH\n"
-        "<exact current content of the broken section>\n"
-        "=======\n"
-        "<corrected replacement>\n"
-        ">>>>>>> REPLACE\n\n"
-        "NEVER wrap SEARCH or REPLACE content in ``` code fences.\n\n"
-        "If everything looks correct — output exactly the string: TESTS_VALID\n"
-        "Do NOT output TESTS_VALID if there are any issues. Fix them instead.\n"
-    )
+    # Compiled stack-specific prompt if present, generic base prompt otherwise.
+    # The validator tier has two compilation units — this is the test audit.
+    base_prompt = resolve_base_prompt("validator_test", root_dir / ".agent")
     system_prompt = build_system_prompt(base_prompt, "validator",
                                         root_dir / ".agent", app_dir)
 

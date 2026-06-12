@@ -9,10 +9,16 @@ from engine.splicer import splice_multi_file_response, extract_file_chunks
 from engine.patch import cleanup_snapshots
 from spec.sdd import sdd_documents_exist, generate_sdd_documents
 from spec.tasks import get_next_task, commit_task_complete, count_tasks
-from spec.steering import generate_steering_files, steering_needs_generation
+from spec.steering import (
+    generate_steering_files,
+    steering_needs_generation,
+    steering_files_stale,
+)
+from spec.prompts import compile_agent_prompts
+from spec.stack import load_stack_profile
 from testing.preflight import validate_source_completeness, validate_test_correctness
 from testing.fixtures import ensure_init_files, check_fixture_drift, get_fixture_summary
-from testing.runner import load_run_config
+from testing.runner import load_run_config, extract_new_test_functions
 from tools.conda import ensure_conda_env, install_bootstrap_packages
 from tools.deps import update_dependencies
 from core.agents import get_architect_plan, execute_surgeon, execute_healer_loop
@@ -23,6 +29,7 @@ from core.checkpoint import (
     clear_checkpoint,
     checkpoint_exists,
     print_checkpoint_status,
+    record_exit_code,
 )
 
 
@@ -73,6 +80,15 @@ def boot() -> None:
     # ── Resume detection ──
     if checkpoint_exists(root_dir):
         print_checkpoint_status(root_dir)
+
+        # Surface how the last session ended before deciding what to do next.
+        last_exit = (load_checkpoint(root_dir) or {}).get("last_exit_code", 0)
+        if last_exit == 0:
+            print("[BOOT] Last session ended green — resuming from next task.")
+        else:
+            print(f"[BOOT] Last session ended with failing tests "
+                  f"(exit code {last_exit}) — the unfinished task will be retried.")
+
         if auto_resume:
             print("[BOOT] Auto-resuming previous session (--resume flag).")
         else:
@@ -116,7 +132,13 @@ def boot() -> None:
     # ── Steering file generation (once per project) ──
     steering_dir = agent_dir / "steering"
     if steering_needs_generation(steering_dir, root_dir):
-        generate_steering_files(agent_dir, root_dir)
+        if steering_files_stale(steering_dir, root_dir):
+            # Full regeneration — recompiles prompts at the end internally.
+            generate_steering_files(agent_dir, root_dir)
+        else:
+            # Steering files intact; only compiled prompts missing/incomplete.
+            print("[PROMPTS] Steering intact — recompiling agent prompts only.")
+            compile_agent_prompts(agent_dir, root_dir)
 
     # ── Conda environment ──
     python_version = config.get("python_version", "3.11")
@@ -215,7 +237,26 @@ def run_task_cycle(
     surgeon_output = execute_surgeon(plan, task_desc, root_dir, app_dir)
 
     # ── Step 3: Apply patches to disk ──
+    # Pre-existence is captured before splicing so step 6 can tell brand new
+    # test files from tests added to existing files.
+    pre_existing = {
+        p for p, _ in extract_file_chunks(surgeon_output)
+        if (root_dir / p).exists()
+    }
     patched = splice_multi_file_response(surgeon_output, root_dir)
+
+    # An empty patch list is a Surgeon failure (output variance/truncation),
+    # not a success — retry once with the same inputs before continuing.
+    if not patched and config.get("surgeon_patch_retry", True):
+        print("[SURGEON] Splicer found nothing to apply — "
+              "retrying Surgeon once with the same inputs...")
+        surgeon_output = execute_surgeon(plan, task_desc, root_dir, app_dir)
+        pre_existing = {
+            p for p, _ in extract_file_chunks(surgeon_output)
+            if (root_dir / p).exists()
+        }
+        patched = splice_multi_file_response(surgeon_output, root_dir)
+
     if not patched:
         print(
             "[WARN] Surgeon produced no valid file patches. Attempting healer anyway..."
@@ -225,18 +266,28 @@ def run_task_cycle(
     ensure_init_files(app_dir)
 
     # ── Step 5: Pre-flight source completeness check ──
-    validate_source_completeness(context_files, task_desc, root_dir, app_dir)
+    if patched:
+        validate_source_completeness(context_files, task_desc, root_dir,
+                                     app_dir)
+    else:
+        print("[VALIDATOR] Skipped — no files patched.")
 
     # ── Step 6: Collect newly written test files from Surgeon output ──
     _run_cfg = load_run_config(root_dir)
     _test_glob = _run_cfg.get("test_file_glob", "test_*.py") if _run_cfg else "test_*.py"
-    new_test_files = [
-        p for p, _ in extract_file_chunks(surgeon_output)
-        if fnmatch(Path(p).name, _test_glob)
-    ]
+    _stack = load_stack_profile(root_dir / ".agent")
+    new_tests = [{
+        "path": p,
+        "is_new_file": p not in pre_existing,
+        "functions": extract_new_test_functions(block, _stack),
+    } for p, block in extract_file_chunks(surgeon_output)
+                 if fnmatch(Path(p).name, _test_glob)]
+    new_test_files = [t["path"] for t in new_tests]
 
     # ── Step 7: Pre-flight test correctness check ──
-    if new_test_files:
+    if not patched:
+        print("[VALIDATOR] Skipped — no files patched.")
+    elif new_test_files:
         validate_test_correctness(new_test_files, context_files, task_desc,
                                   root_dir, app_dir)
 
@@ -254,16 +305,21 @@ def run_task_cycle(
     if config.get("auto_install_deps", True):
         update_dependencies(app_dir, root_dir, conda_env)
 
-    # ── Step 10: Healer loop ──
-    success = execute_healer_loop(
+    # ── Step 10: Healer loop (adaptive three-phase test execution) ──
+    success, healer_exit_code = execute_healer_loop(
         task_desc=task_desc,
         root_dir=root_dir,
         app_dir=app_dir,
         conda_env=conda_env,
         telemetry_file=telemetry_file,
+        new_tests=new_tests,
+        task_index=task_index,
     )
 
     if not success:
+        # Record the red exit code so the next boot can tell this session
+        # ended mid-healer rather than green.
+        record_exit_code(root_dir, healer_exit_code)
         return False
 
     # ── Step 11: Commit task state ──
@@ -279,6 +335,6 @@ def run_task_cycle(
     # ── Step 13: Save checkpoint ──
     modified_files = [p for p, _ in extract_file_chunks(surgeon_output)]
     save_checkpoint(root_dir, task_desc, modified_files, task_index,
-                    total_tasks)
+                    total_tasks, last_exit_code=healer_exit_code)
 
     return True

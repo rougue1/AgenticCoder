@@ -78,10 +78,29 @@ max_healer_retries: 3
 # 1 = use healer model for pass 1, escalate from pass 2 onward
 healer_escalate_after: 1
 
+# Hard cap (characters) on source file content loaded into the healer's
+# context per repair attempt. Files referenced in the traceback are loaded
+# whole, most-mentioned first; loading stops once the next file would
+# exceed the budget. Omitted files are named in the healer's prompt.
+healer_context_budget: 6000
+
+# ── Adaptive Test Runner ──────────────────────────────────────────
+# How often Phase 3 (full suite run) executes after Phases 1–2 pass:
+#   1 = every task (default — strongest correctness guarantee)
+#   N = every N tasks (faster cycles on large projects)
+#   0 = only when forced via the AGENT_FORCE_SUITE=1 environment variable
+# Phases 1–2 (targeted/file runs) require command templates in
+# .agent/stack.md; without stack.md every run is a full suite run.
+suite_run_every_n_tasks: 1
+
 # ── Surgeon Quality Gate ──────────────────────────────────────────
 # Minimum character count for a valid surgeon response.
 # Responses shorter than this are assumed to be truncated and retried once.
 surgeon_min_output_chars: 100
+
+# Retry the Surgeon once when the splicer finds no applicable patches in
+# its output (LLM formatting drift / truncation). Set false to disable.
+surgeon_patch_retry: true
 
 # ── Git Integration ───────────────────────────────────────────────
 # DISABLED — set to false to skip all git operations entirely.

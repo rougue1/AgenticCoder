@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 from tools.conda import run_in_env
 
@@ -218,6 +220,261 @@ def load_run_config(root_dir: Path) -> dict | None:
     except Exception as e:
         print(f"[RUNNER] Failed to parse run.json: {e}")
         return None
+
+
+# ==========================================
+# ADAPTIVE THREE-PHASE EXECUTION (stack.md-driven)
+# ==========================================
+#
+# All command syntax for targeted and file-level runs comes from the
+# stack.md command templates ({file} / {test} placeholders). Nothing in
+# this section names a test runner. When stack.md is absent the healer
+# loop never calls these functions — it runs the full suite via run_tests().
+
+
+def resolve_test_cwd(root_dir: Path) -> Path:
+    """
+    Working directory for stack.md template commands. Mirrors the suite
+    runner's rule: run.json test_cwd relative to project root, defaulting
+    to the project root itself.
+    """
+    run_config = load_run_config(root_dir)
+    test_cwd = run_config.get("test_cwd") if run_config else None
+    return (root_dir / test_cwd) if test_cwd else root_dir
+
+
+def run_targeted_tests(
+    root_dir: Path,
+    conda_env: str,
+    test_file: str,
+    test_functions: list[str],
+    stack_profile: dict,
+) -> tuple[int, str]:
+    """
+    Phase 1 — runs only the named test functions in test_file, one
+    targeted_test_command invocation per function. test_file is relative
+    to the project root. Falls back to a whole-file run when the profile
+    has no targeted template or no function names were supplied.
+    """
+    template = stack_profile.get("targeted_test_command")
+    if not template or not test_functions:
+        return run_file_tests(root_dir, conda_env, test_file, stack_profile)
+
+    cwd = resolve_test_cwd(root_dir)
+    rel_file = os.path.relpath(root_dir / test_file, cwd)
+
+    results = []
+    for func in test_functions:
+        code, out = _run_template_command(template,
+                                          conda_env,
+                                          cwd,
+                                          file=rel_file,
+                                          test=func)
+        results.append((f"targeted {func}", code, out))
+    return aggregate_results(results)
+
+
+def run_file_tests(
+    root_dir: Path,
+    conda_env: str,
+    test_file: str,
+    stack_profile: dict,
+) -> tuple[int, str]:
+    """
+    Phase 2 — runs the entire test file via the file_test_command template.
+    test_file is relative to the project root.
+    """
+    template = stack_profile.get("file_test_command")
+    if not template:
+        # Builder should never route here without a template; degrade to the
+        # authoritative suite run rather than failing the phase outright.
+        return run_tests(root_dir / "app", conda_env, root_dir)
+
+    cwd = resolve_test_cwd(root_dir)
+    rel_file = os.path.relpath(root_dir / test_file, cwd)
+    return _run_template_command(template, conda_env, cwd, file=rel_file)
+
+
+def count_failures(exit_code: int, test_output: str) -> int:
+    """
+    Best-effort failure count from runner output, used for the healer's
+    regression (rollback) comparison. Heuristics only — these are generic
+    summary-line shapes shared by most runners, not runner-specific syntax.
+    Consistency between two runs of the same command matters more here than
+    absolute accuracy. A nonzero exit with no parseable count counts as 1.
+    """
+    if exit_code == 0:
+        return 0
+
+    for pattern in (r'(\d+)\s+fail(?:ed|ures?)', r'fail(?:ed|ures?)\D{0,3}(\d+)'):
+        matches = re.findall(pattern, test_output, re.IGNORECASE)
+        if matches:
+            # Last match — summary lines come after per-test detail.
+            return max(int(matches[-1]), 1)
+
+    marker_lines = sum(
+        1 for line in test_output.splitlines()
+        if re.search(r'\bFAIL(?:ED)?\b|\bERRORS?\b', line))
+    return max(marker_lines, 1)
+
+
+# Fallback test-declaration patterns covering common stacks. Stack names are
+# permitted here only because this is a fallback path — stack.md's
+# test_function_pattern key overrides the whole set when present.
+_FALLBACK_TEST_PATTERNS = (
+    r'(?:async\s+)?def\s+(test_\w+)\s*\(',
+    r'\bfunc\s+(Test\w+)\s*\(',
+    r'\bfn\s+(test_\w+)\s*\(',
+    r'(?:^|[^\w.])(?:it|test)\(\s*[\'"]([^\'"]+)[\'"]',
+)
+
+
+def get_test_declaration_patterns(stack_profile: dict | None) -> tuple[str, ...]:
+    """Regexes (one capture group = test name) identifying test declarations."""
+    if stack_profile and stack_profile.get("test_function_pattern"):
+        return (stack_profile["test_function_pattern"],)
+    return _FALLBACK_TEST_PATTERNS
+
+
+def extract_test_function_names(
+    text: str,
+    stack_profile: dict | None = None,
+) -> list[str]:
+    """All test names declared in text, in order of appearance, deduplicated."""
+    names = []
+    seen = set()
+    for pattern in get_test_declaration_patterns(stack_profile):
+        for match in re.finditer(pattern, text, re.MULTILINE):
+            name = match.group(1)
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def extract_new_test_functions(
+    block_content: str,
+    stack_profile: dict | None = None,
+) -> list[str]:
+    """
+    Test names the Surgeon just wrote: declared in REPLACE segments of a
+    file chunk but absent from its SEARCH anchors (a SEARCH anchor may
+    legitimately contain an existing test's declaration as context).
+    """
+    search_parts, replace_parts = [], []
+    for chunk in block_content.split("<<<<<<< SEARCH")[1:]:
+        if "=======" not in chunk:
+            continue
+        search_raw, rest = chunk.split("=======", 1)
+        replace_parts.append(rest.split(">>>>>>> REPLACE", 1)[0])
+        search_parts.append(search_raw)
+
+    existing = set(
+        extract_test_function_names("\n".join(search_parts), stack_profile))
+    return [
+        name for name in extract_test_function_names("\n".join(replace_parts),
+                                                     stack_profile)
+        if name not in existing
+    ]
+
+
+def failing_test_names(
+    test_output: str,
+    candidates: list[str],
+    strict: bool = False,
+) -> list[str]:
+    """
+    Which of the candidate test names failed, judged from runner output.
+    Primary signal: the name appears on a line carrying a failure marker.
+    Non-strict mode falls back to any mention of the name in the output —
+    only safe for small targeted runs; verbose suite output mentions
+    passing tests too, so suite/file callers must pass strict=True.
+    """
+    failure_line = re.compile(r'FAIL|ERROR|✗|✕|×|not ok|panic', re.IGNORECASE)
+    failing = []
+    for line in test_output.splitlines():
+        if not failure_line.search(line):
+            continue
+        for name in candidates:
+            if name in line and name not in failing:
+                failing.append(name)
+
+    if not failing and not strict:
+        failing = [n for n in candidates if n in test_output]
+    return failing
+
+
+def extract_function_source(
+    file_text: str,
+    name: str,
+    stack_profile: dict | None = None,
+) -> str:
+    """
+    Extracts one test function's source by name: from its declaration line
+    (plus any decorator/attribute lines directly above) to the line before
+    the next test declaration, or EOF. Declaration shape comes from the
+    same patterns used for name extraction, so this stays stack-agnostic.
+    """
+    patterns = get_test_declaration_patterns(stack_profile)
+    lines = file_text.splitlines()
+
+    start = None
+    for i, line in enumerate(lines):
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match and match.group(1) == name:
+                start = i
+                break
+        if start is not None:
+            break
+    if start is None:
+        return ""
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        found_next = False
+        for pattern in patterns:
+            match = re.search(pattern, lines[j])
+            if match and match.group(1) != name:
+                found_next = True
+                break
+        if found_next:
+            end = j
+            break
+
+    while start > 0 and lines[start - 1].lstrip().startswith("@"):
+        start -= 1
+
+    return "\n".join(lines[start:end]).rstrip()
+
+
+def _run_template_command(
+    template: str,
+    conda_env: str,
+    cwd: Path,
+    file: str | None = None,
+    test: str | None = None,
+) -> tuple[int, str]:
+    """
+    Substitutes {file}/{test} placeholders into a stack.md command template
+    and executes it. Plain replace (not str.format) so literal braces in a
+    template never raise.
+    """
+    cmd_str = template
+    if file is not None:
+        cmd_str = cmd_str.replace("{file}", file)
+    if test is not None:
+        cmd_str = cmd_str.replace("{test}", test)
+
+    cmd = shlex.split(cmd_str)
+    print(f"[RUNNER] Running via stack.md template: {' '.join(cmd)}")
+    return run_in_env(
+        cmd,
+        conda_env,
+        cwd=cwd,
+        extra_env={"CI": "true"},
+        timeout=300,
+    )
 
 
 # ==========================================
