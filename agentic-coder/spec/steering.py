@@ -299,12 +299,27 @@ def generate_steering_files(
         _write_default_steering(steering_dir)
         return
 
-    agents_content = _prepend_universal_rules(data.get("agents", ""))
+    agents_raw = data.get("agents", "")
+    if isinstance(agents_raw, dict):
+        # Model returned a nested object instead of a string — flatten it
+        agents_raw = "\n\n".join(
+            f"## {k}\n{v}" if isinstance(v, str) else f"## {k}\n{json.dumps(v, indent=2)}"
+            for k, v in agents_raw.items()
+        )
+    agents_content = _prepend_universal_rules(agents_raw)
+
     (steering_dir / "AGENTS.md").write_text(agents_content, encoding="utf-8")
-    (steering_dir / "tech.md").write_text(data.get("tech", ""),
-                                          encoding="utf-8")
-    (steering_dir / "structure.md").write_text(data.get("structure", ""),
-                                               encoding="utf-8")
+
+    tech_raw = data.get("tech", "")
+    if isinstance(tech_raw, dict):
+        tech_raw = json.dumps(tech_raw, indent=2)
+
+    structure_raw = data.get("structure", "")
+    if isinstance(structure_raw, dict):
+        structure_raw = json.dumps(structure_raw, indent=2)
+
+    (steering_dir / "tech.md").write_text(tech_raw, encoding="utf-8")
+    (steering_dir / "structure.md").write_text(structure_raw, encoding="utf-8")
 
     # Write machine-readable test runner config to .agent/run.json
     test_command = data.get("test_command")
@@ -532,6 +547,9 @@ def _prepend_universal_rules(agent_content: str) -> str:
     Ensures the universal output format rules are always present in AGENTS.md
     regardless of what the Architect generated. Prepended so they appear first.
     """
+    if not isinstance(agent_content, str):
+        agent_content = json.dumps(agent_content, indent=2) if isinstance(
+            agent_content, dict) else str(agent_content)
     universal = """\
 ## Output Format Rules (NEVER violate these)
 

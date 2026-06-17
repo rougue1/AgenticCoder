@@ -29,14 +29,14 @@ python_version: "3.11"
 #                Recommended: qwen2.5-coder:7b, llama3.1:8b
 
 models:
-    architect: "deepseek-r1:32b"
-    surgeon: "qwen2.5-coder:32b"
-    healer: "qwen2.5-coder:7b"
-    validator: "qwen2.5-coder:7b"
+    architect: "qwen3.5:9b"
+    surgeon: "qwen2.5-coder:14b"
+    healer: "qwen3.5:9b"
+    validator: "qwen3.5:9b"
 
 # Model to escalate to when the healer exhausts first-pass retries.
 # Should be the same as or more capable than the surgeon model.
-healer_escalation_model: "qwen2.5-coder:32b"
+healer_escalation_model: "qwen2.5-coder:14b"
 
 # ── API Configuration ─────────────────────────────────────────────
 # Base URL for the Ollama server. Do NOT include a /v1 path suffix.
